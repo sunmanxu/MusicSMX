@@ -1,0 +1,529 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MusicSMX 桌面歌词</title>
+<style>
+  :root {
+    --accent: #ff6b3d;
+    --ink: #ffffff;
+    /* 两行共用的槽高（px），由 applyFont 写入：两行等高，换句时谁都不会被顶走 */
+    --row-h: 36px;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; width: 100%; height: 100%;
+    background: transparent; overflow: hidden;
+    user-select: none; -webkit-user-select: none;
+    font-family: "Segoe UI", "Microsoft YaHei", "PingFang SC", sans-serif;
+  }
+  /* 窗口整块透明：任务栏模式默认不画任何底色，文字直接压在任务栏上，
+     以前那层 rgba(12,14,20,.55) 就是「一圈深色底」的来源。 */
+  #box {
+    position: relative; width: 100%; height: 100%;
+    -webkit-app-region: drag;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    padding: 8px 46px;
+    border-radius: 8px;
+  }
+  /* 背景只有「透明 / 磨砂 / 深色」三档，各自用固定透明度 ——
+     不再单独暴露「背景透明度」滑块，那个滑块已经换成「文字透明度」。 */
+  body[data-bg="soft"] #box { background: rgba(18, 20, 28, 0.52); }
+  body[data-bg="dark"] #box { background: rgba(9, 11, 17, 0.88); }
+
+  #line {
+    width: 100%; max-width: 100%;
+    display: flex; flex-direction: column;
+    align-items: center; gap: 6px; min-width: 0;
+    /* 文字透明度（只影响文字，底板不受影响） */
+    opacity: var(--text-a, 1);
+  }
+  body[data-align="left"] #box { align-items: flex-start; }
+  body[data-align="left"] #line { align-items: flex-start; text-align: left; }
+
+  /* 两个固定槽：行高都是 --row-h，所以「副行变主行」时行盒高度不变，
+     整块文字不会因为字号变大而上下浮动。
+     关键：两行**同字号**（字号在 applyFont 里统一写），宽度又都撑满整行再居中 ——
+     同一句话无论落在上槽还是下槽，渲染位置完全一样，换句时不会有任何位移。
+     主次靠亮度/字重区分（正在唱 = 纯白加粗，另一行 = 6 成不透明）。 */
+  #cur, #sub {
+    width: 100%; max-width: 100%; white-space: nowrap;
+    overflow: hidden; text-overflow: ellipsis;
+    text-align: center;
+    line-height: var(--row-h, 1.32);
+    min-height: var(--row-h, 0);
+  }
+  body[data-align="left"] #cur,
+  body[data-align="left"] #sub { text-align: left; }
+  #cur {
+    font-size: 27px; font-weight: 700;
+    letter-spacing: 0.5px; color: var(--fill);
+  }
+  body[data-shadow="1"] #cur,
+  body[data-shadow="1"] #sub {
+    text-shadow: 0 2px 5px rgba(0,0,0,.92), 0 0 10px rgba(0,0,0,.8), 1px 1px 2px rgba(0,0,0,.9);
+  }
+  /* 任务栏上只有一行小字，三层阴影会糊出黑边，浅色任务栏下尤其脏 */
+  body.taskbar[data-shadow="1"] #cur {
+    text-shadow: 0 1px 2px rgba(0,0,0,.85), 0 0 3px rgba(0,0,0,.5);
+  }
+  /* 副行与主行同字号、同字重、同字距：只要有一项不同，同一句话在上下槽里的
+     渲染宽度就不一样，居中之后照样会横移几个像素。主次只靠亮度区分。 */
+  #sub {
+    font-size: 15px; font-weight: 700; letter-spacing: 0.5px;
+    /* 未唱颜色/透明度统一走 --unsung（含 alpha 的完整色值）：与逐字未唱部分
+       同源，预览→开唱外观零变化；副行做翻译/歌手兜底时也一样用未唱色。 */
+    color: var(--unsung);
+  }
+  #sub:empty { display: none; }
+
+  /* ---------- 双行：两行原位交替，绝不上滚 ----------
+     正在唱的那句永远渲染在 #cur，另一行是 #sub。
+     句序为奇数时把两行的显示顺序反过来：正在唱的句子留在「第二行」的位置，
+     第一行原地换成下一句 —— 用户看到的就是「第一句念完接着念第二行，
+     同时第一行更新为第三句」，位置全程不动。 */
+  body[data-layout="dual"][data-swap="1"] #line { flex-direction: column-reverse; }
+
+  /* ---------- 逐字点亮（卡拉OK） ----------
+     和全屏页一致：每个字用 --p（0~1）表达唱到哪，不切 class，
+     否则 color 过渡会让字在「正在唱→已唱完」的瞬间闪一下。
+     逐字时容器关掉 text-shadow，改用 drop-shadow：text-shadow 会和
+     background-clip:text 打架，字会糊成一团。 */
+  /* 逐字容器一律不要 text-shadow / filter（描边交给每个字自己）：
+     text-shadow 画在填充之上，会把 background-clip 的字整块盖成黑色；
+     父级 filter 则会直接让 background-clip 失效。
+     这里把三条选择器都列上，是因为 body[data-shadow="1"] #cur 的层级比
+     #cur.wordmode 高，漏一条就会被上面的重阴影反压回去。 */
+  #cur.wordmode,
+  body[data-shadow="1"] #cur.wordmode,
+  body.taskbar[data-shadow="1"] #cur.wordmode {
+    text-shadow: none;
+    filter: none;
+  }
+  #cur .w {
+    display: inline-block;
+    color: transparent;
+    background-image: linear-gradient(90deg,
+      var(--fill) calc(var(--p, 0) * 100%),
+      var(--unsung) calc(var(--p, 0) * 100%));
+    -webkit-background-clip: text;
+    background-clip: text;
+    /* 字自己的投影：先按字渲染（含 clip 的渐变填充），再在结果外围加深影。
+       不能写 text-shadow —— 它画在填充之上，字会被阴影整块盖住变黑；
+       也不能挂在父级 #cur 上 —— 父级 filter 会让 background-clip 直接失效。 */
+    filter: drop-shadow(0 1px 2px rgba(0,0,0,.9));
+  }
+  body[data-shadow="0"] #cur .w { filter: none; }
+  /* 副行预览阴影对齐逐字字（2026-11-20 用户反馈「预览粗、开唱变细」）：
+     预览 = 三层厚 text-shadow（视觉显粗），逐字字 = 单层薄 drop-shadow（显细）。
+     主行逐字渲染时把副行切成与 .w 完全相同的单层 drop-shadow，
+     字重本来一致，阴影一致后唯一区别就只剩逐字进度。
+     非逐字行主行是三层 text-shadow，副行保持默认三层，同样一致。 */
+  body.wordmode[data-shadow="1"] #sub {
+    text-shadow: none;
+    filter: drop-shadow(0 1px 2px rgba(0,0,0,.9));
+  }
+
+  /* ---------- 悬停工具条（只在桌面悬浮模式出现） ---------- */
+  #tools {
+    position: absolute; top: 8px; right: 8px;
+    display: none; gap: 4px;
+    opacity: 0; transition: opacity 0.16s;
+    -webkit-app-region: no-drag;
+  }
+  body:not(.taskbar) #box:hover #tools { display: flex; opacity: 1; }
+  .tbtn {
+    min-width: 24px; height: 24px; padding: 0 6px;
+    border: none; border-radius: 6px;
+    background: rgba(0, 0, 0, 0.45); color: #fff;
+    font-size: 12px; line-height: 24px; text-align: center;
+    cursor: pointer; -webkit-app-region: no-drag;
+  }
+  .tbtn:hover { background: rgba(0, 0, 0, 0.8); }
+  .tbtn.on { color: var(--accent); }
+
+  /* ---------- 任务栏模式：单行、贴合任务栏 ---------- */
+  body.taskbar #box {
+    flex-direction: row;
+    padding: 0 12px;
+    border-radius: 6px;
+  }
+  body.taskbar #line {
+    flex-direction: row; align-items: center; gap: 8px;
+  }
+  body.taskbar #cur,
+  body.taskbar #sub {
+    font-size: 15px; font-weight: 700; letter-spacing: 0;
+  }
+  body.taskbar:not([data-layout="dual"]) #sub { display: none; }
+  /* 任务栏双行：两行都压进任务栏厚度（约 40px）里，字号由 applyFont 统一写。
+     这里只留兜底值 —— 两行必须完全同字号，否则换句会横移。 */
+  body.taskbar[data-layout="dual"] #line {
+    flex-direction: column; align-items: flex-start; gap: 1px;
+  }
+  body.taskbar[data-layout="dual"] #cur,
+  body.taskbar[data-layout="dual"] #sub {
+    font-size: 13px;
+  }
+  body.taskbar[data-layout="dual"] #sub {
+    display: block;
+  }
+  /* 放在最后：任务栏双行同样要支持「正在唱的那行留在原位」 */
+  body.taskbar[data-layout="dual"][data-swap="1"] #line { flex-direction: column-reverse; }
+  body.taskbar #tools { display: none !important; }
+
+  /* 鼠标穿透时本窗口收不到任何事件，工具条自然不用显示 */
+  body.locked #tools { display: none !important; }
+</style>
+</head>
+<body>
+<div id="box">
+  <div id="tools">
+    <button class="tbtn" id="t-font-down" title="缩小歌词">A−</button>
+    <button class="tbtn" id="t-font-up" title="放大歌词">A+</button>
+    <button class="tbtn" id="t-lock" title="鼠标穿透（右键菜单可解锁）">穿透</button>
+    <button class="tbtn" id="t-close" title="关闭歌词">×</button>
+  </div>
+  <div id="line">
+    <div id="cur">MusicSMX · 歌词</div>
+    <div id="sub"></div>
+  </div>
+</div>
+<script>
+(function () {
+  const mb = window.mb;
+  const box = document.getElementById('box');
+  const line = document.getElementById('line');
+  const cur = document.getElementById('cur');
+  const sub = document.getElementById('sub');
+
+  let mode = 'desktop';
+  let scale = 1;
+  let locked = false;
+  let data = null;
+  // 切歌渐出渐入状态：lastTitle 判「换了歌」，pendingD 攒淡出期间到达的最新帧
+  let lastTitle = null;
+  let pendingD = null;
+  let fadeTimer = 0;
+  // 换句定稿（2026-11-20 用户三轮反馈后拍板）：**纯瞬时换句，不做任何淡入淡出**。
+  // 平滑感不靠动画，靠亮度对齐：当前句的未唱亮度 --unsung 与副行预览（62%）完全
+  // 一致，副行转主行瞬间外观零变化，逐字点亮只是在原亮度上叠加——第二句无缝续接。
+  // 原句槽位原地瞬换成第三句预览（用户接受瞬变，只要求别闪）。
+  // 整行淡化（淡出期间什么都看不见=闪）和 ghost 克隆交叉淡化（两段文字叠在同一
+  // 槽位 320ms=抽搐）都实测被否，全部删除。
+  // 外观选项：主进程是唯一真源，这里只做镜像，改了先本地生效再回报
+  let style = {
+    words: true, translation: true, nextLine: true,
+    color: '#ffffff', accentWord: false,
+    sungColor: '', sungAlpha: 1,       // 已唱颜色/透明度：留空=跟随文字颜色
+    unsungColor: '', unsungAlpha: 0.62,// 未唱颜色/透明度：62% = 老版默认
+    bg: 'none', align: 'center', shadow: true,
+    opacity: 1, layout: 'dual'
+  };
+
+  // 本地时钟外推：主窗口 ~4Hz 推一次 currentTime，逐字若按推送节奏走会一顿一顿，
+  // 所以记住「收到的那一刻」和「那一刻的播放进度」，之后自己按 performance.now 往前推。
+  let recvAt = 0;
+  let recvTime = 0;
+  let wordEls = null;
+  let wordCache = null;
+  let rafId = 0;
+  let lastFitW = 0;
+
+  function nowTime() {
+    if (!data) return 0;
+    if (!data.playing) return recvTime;
+    return recvTime + (performance.now() - recvAt) / 1000;
+  }
+
+  function applyStyle() {
+    const color = (!style.color || style.color === 'accent')
+      ? (data && data.accent ? data.accent : '#ff6b3d')
+      : style.color;
+    const accent = (data && data.accent) || '#ff6b3d';
+    // 已唱/未唱颜色与透明度（2026-11-20 歌词设置新增）：
+    // sungColor/unsungColor 留空 = 跟随「文字颜色」（兼容老配置）；
+    // sungAlpha 默认 1、unsungAlpha 默认 0.62 = 老版硬编码的 62%。
+    const sungRaw = style.sungColor;
+    const sung = (!sungRaw) ? (style.accentWord ? accent : color)
+      : (sungRaw === 'accent' ? accent : sungRaw);
+    const sungA = Math.max(0.05, Math.min(1, isFinite(Number(style.sungAlpha)) ? Number(style.sungAlpha) : 1));
+    const unsungRaw = style.unsungColor;
+    const unsung = (!unsungRaw) ? color : (unsungRaw === 'accent' ? accent : unsungRaw);
+    const unsungA = Math.max(0.05, Math.min(1, isFinite(Number(style.unsungAlpha)) ? Number(style.unsungAlpha) : 0.62));
+    document.documentElement.style.setProperty('--ink', color);
+    // 已唱：逐字点亮 / 非逐字整句共用 --fill（accentWord 只在未显式指定已唱颜色时生效）
+    document.documentElement.style.setProperty('--fill',
+      'color-mix(in srgb, ' + sung + ' ' + Math.round(sungA * 100) + '%, transparent)');
+    // 未唱：透明度直接烧进色值（color-mix 百分比 = alpha），.w 渐变与 #sub 预览同源，
+    // 预览→开唱外观零变化的老规矩由同一个变量保证
+    document.documentElement.style.setProperty('--unsung',
+      'color-mix(in srgb, ' + unsung + ' ' + Math.round(unsungA * 100) + '%, transparent)');
+    // 只有文字透明度：底板（磨砂 / 深色）用固定值，不会被这条调淡
+    // 透明度下限 10%（主进程按模式存两份，这里只负责把拿到的值夹进合法区间）
+    const op = Number(style.opacity);
+    document.documentElement.style.setProperty('--text-a', isFinite(op) ? Math.max(0.1, Math.min(1, op)) : 1);
+    document.body.dataset.bg = style.bg || 'none';
+    document.body.dataset.align = style.align || 'center';
+    document.body.dataset.shadow = style.shadow ? '1' : '0';
+    // 布局只有单行 / 双行（流水已下线，老配置里的 marquee 在这里也回落成双行）
+    document.body.dataset.layout = style.layout === 'single' ? 'single' : 'dual';
+    applyFont();
+  }
+
+  // 字号与内边距跟随缩放；任务栏模式窗口高度 = 任务栏厚度，字号必须夹住别溢出
+  function applyFont() {
+    const desktopBase = 27, taskbarBase = 15;
+    const dual = (style.layout || 'dual') !== 'single';
+    let rowH;
+    if (mode === 'taskbar') {
+      // 任务栏双行是两行挤在同一条 40px 里：单行可用高度要减半再分给两行
+      const boxH = Math.max(20, window.innerHeight - 4);
+      const limit = dual ? Math.max(10, boxH / 2) : Math.max(11, boxH);
+      const base = dual ? taskbarBase * 0.86 : taskbarBase;
+      const fs = Math.min(base * scale, dual ? limit * 0.92 : limit);
+      cur.style.fontSize = fs + 'px';
+      // 副行必须跟主行同字号：字号一变，同一句话的渲染宽度就变，
+      // 居中之后整句会横向跳一下 —— 用户说的「新唱到的一句突然位移」就是它。
+      // 主次差异交给颜色和字重，别再靠字号。
+      sub.style.fontSize = fs + 'px';
+      rowH = dual ? Math.ceil(fs * 1.16) : Math.ceil(fs * 1.3);
+      box.style.padding = '0 ' + Math.round(12 * Math.max(1, scale * 0.9)) + 'px';
+    } else {
+      const fs = desktopBase * scale;
+      cur.style.fontSize = fs + 'px';
+      sub.style.fontSize = fs + 'px';
+      rowH = Math.round(fs * 1.32);
+      box.style.padding = Math.round(8 * scale) + 'px ' + Math.round(46 * scale) + 'px';
+    }
+    // 两行共用同一个槽高：换句时行盒高度不变，整块文字不会上下漂
+    document.documentElement.style.setProperty('--row-h', rowH + 'px');
+    scheduleFit();
+  }
+
+  // 任务栏模式：把「这句文字要占多宽」报给主进程，窗口只包住文字本身。
+  // 以前窗口固定占任务栏一半宽（1920 屏上 960px），短歌词也横着压住中间那排图标。
+  // 注意不能用 scrollWidth：两行现在是 width:100% 撑满窗口，scrollWidth 等于窗口宽，
+  // 上报回去就是「窗口说自己需要窗口这么宽」，永远收不回来。用 Range 量文字本身。
+  function textWidth(el) {
+    if (!el || el.style.display === 'none' || !el.textContent.trim()) return 0;
+    try {
+      const r = document.createRange();
+      r.selectNodeContents(el);
+      return r.getBoundingClientRect().width;
+    } catch (e) { return 0; }
+  }
+  function scheduleFit() {
+    if (mode !== 'taskbar') return;
+    if (!mb || typeof mb.lyricFitWidth !== 'function') return;
+    requestAnimationFrame(() => {
+      if (mode !== 'taskbar') return;
+      const pad = parseFloat(getComputedStyle(box).paddingLeft) || 12;
+      const w = Math.ceil(Math.max(textWidth(cur), textWidth(sub))) + pad * 2 + 4;
+      if (w > 40 && Math.abs(w - lastFitW) >= 3) {
+        lastFitW = w;
+        mb.lyricFitWidth(w);
+      }
+    });
+  }
+
+  // ---------- 逐字渲染 ----------
+  function stopWords() {
+    if (rafId) { cancelAnimationFrame(rafId); rafId = 0; }
+    wordEls = null; wordCache = null;
+    cur.classList.remove('wordmode');
+  }
+
+  function buildWords(words) {
+    if (rafId) { cancelAnimationFrame(rafId); rafId = 0; }
+    cur.textContent = '';
+    cur.classList.add('wordmode');
+    wordEls = [];
+    wordCache = words;
+    const frag = document.createDocumentFragment();
+    for (const w of words) {
+      const s = document.createElement('span');
+      s.className = 'w';
+      // inline-block 里首尾空格会被折叠掉，宽度变 0，逐字就会「卡一下」
+      s.textContent = String(w.w || '').replace(/ /g, '\u00A0');
+      s.style.setProperty('--p', '0');
+      frag.appendChild(s);
+      wordEls.push(s);
+    }
+    cur.appendChild(frag);
+  }
+
+  function tick() {
+    if (!wordEls || !wordCache || !data) { rafId = 0; return; }
+    const t = nowTime() + (Number(data.offset) || 0);
+    const words = wordCache;
+    let allDone = true;
+    for (let i = 0; i < words.length; i++) {
+      const w = words[i];
+      let p;
+      if (t >= w.t + w.d) p = 1;
+      else if (t <= w.t) p = 0;
+      else p = (t - w.t) / (w.d || 1);
+      const el = wordEls[i];
+      // 变化 < 1% 就不写样式，省掉每帧的样式重算
+      if (el._p === undefined || Math.abs(p - el._p) >= 0.01) {
+        el._p = p;
+        el.style.setProperty('--p', p.toFixed(3));
+      }
+      if (p < 1) allDone = false;
+    }
+    if (allDone && !data.playing) { rafId = 0; return; }
+    rafId = requestAnimationFrame(tick);
+  }
+
+  function renderWords() {
+    const words = data && data.words;
+    const useWords = style.words && words && words.length > 0;
+    // 副行阴影跟随主行渲染方式（2026-11-20 用户反馈「预览粗、开唱突然变细」）：
+    // 逐字模式下主行字只能用单层 drop-shadow（text-shadow 会击穿 background-clip），
+    // 副行若还是三层 text-shadow 厚晕，预览就显得粗、开唱掉到薄影显得细。
+    // body.wordmode 驱动 CSS 把副行切成与 .w 完全相同的单层 drop-shadow。
+    document.body.classList.toggle('wordmode', useWords);
+    if (!useWords) {
+      stopWords();
+      const hasLyric = !!(data && data.current && data.current.trim());
+      const txt = hasLyric ? data.current : ((data && data.title) || 'MusicSMX · 歌词');
+      // 内容没变就别重建节点：4Hz 的推送每次都重建会打断逐字动画
+      if (cur.textContent !== txt) cur.textContent = txt;
+      scheduleFit();
+      return;
+    }
+    const same = wordCache && wordCache.length === words.length &&
+                 (wordCache[0] ? wordCache[0].t === words[0].t : false);
+    if (!same) buildWords(words);
+    else { wordCache = words; if (wordEls) wordEls.forEach(el => { el._p = undefined; }); }
+    if (!rafId) rafId = requestAnimationFrame(tick);
+    scheduleFit();
+  }
+
+  function render(d) {
+    if (!d) return;
+    // 切歌渐出渐入（2026-11-19）：换歌瞬间旧歌词不能「断崖式」消失。
+    // 检测到歌名变了就把整块文字淡出，期间到达的推送只攒着不应用，
+    // 淡出结束后应用最新一帧并淡入 —— 逐字进度靠 recvAt/recvTime 外推，不受影响。
+    if (lastTitle !== null && d.title !== lastTitle) {
+      lastTitle = d.title;
+      pendingD = d;
+      if (!fadeTimer) {
+        line.style.transition = 'opacity 0.35s ease';
+        line.style.opacity = '0';
+        fadeTimer = setTimeout(() => {
+          fadeTimer = 0;
+          const pd = pendingD; pendingD = null;
+          // 先在透明状态换好内容，再淡回目标透明度（--text-a 由 CSS 变量接管）
+          line.style.transition = 'none';
+          line.style.opacity = '0';
+          applyRender(pd);
+          void line.offsetWidth; // 强制 reflow，确保透明态先落定再开过渡
+          line.style.transition = 'opacity 0.55s ease';
+          line.style.opacity = '';
+        }, 360);
+      }
+      return;
+    }
+    lastTitle = d.title;
+    if (pendingD) { pendingD = d; return; } // 淡出过程中：只攒最新帧
+    // 换句：纯瞬时换内容（见上方定稿注释），不做任何过渡
+    applyRender(d);
+  }
+
+  function applyRender(d) {
+    data = d;
+    recvAt = performance.now();
+    recvTime = Number(d.time) || 0;
+    document.documentElement.style.setProperty('--accent', d.accent || '#ff6b3d');
+    applyStyle();
+    // 副行只在「双行」布局出现：翻译优先，其次下一句，最后歌手。
+    // 单行不显示，任务栏双行则把副行压进第二行。
+    const dual = (style.layout || 'dual') !== 'single';
+    const usingTranslation = dual && !!style.translation && !!(d.translation && d.translation.trim());
+    let subText = '';
+    if (dual) {
+      if (usingTranslation) subText = d.translation;
+      else if (style.nextLine && d.next) subText = d.next;
+      else subText = d.artist || '';
+    }
+    // 双行交替只服务「下一句」这种场景：句序奇偶决定正在唱的那句摆上槽还是下槽，
+    // 换句时只有一行原地换内容，谁都不上移。
+    // 一旦副行是翻译，就必须固定「上原文 / 下译文」——译文跑到上行、原文掉下行，
+    // 读起来完全是乱的，所以这种情况下强制不交替（data-swap 归 0）。
+    const idx = Number(d.lineIndex);
+    const swap = dual && !usingTranslation && idx >= 0 && (idx % 2 === 1);
+    document.body.dataset.swap = swap ? '1' : '0';
+    renderWords();
+    sub.textContent = subText;
+    scheduleFit();
+  }
+
+  function setMode(m) {
+    mode = (m === 'taskbar') ? 'taskbar' : 'desktop';
+    document.body.classList.toggle('taskbar', mode === 'taskbar');
+    lastFitW = 0;
+    applyFont();
+    if (data) render(data);
+  }
+
+  if (mb) {
+    if (typeof mb.onLyricData === 'function') mb.onLyricData(render);
+    if (typeof mb.onLyricMode === 'function') mb.onLyricMode(setMode);
+    if (typeof mb.onLyricScale === 'function') {
+      mb.onLyricScale((v) => { scale = Math.max(0.3, Math.min(1.8, Number(v) || 1)); applyFont(); });
+    }
+    if (typeof mb.onLyricStyle === 'function') {
+      mb.onLyricStyle((st) => {
+        if (!st) return;
+        style = Object.assign(style, st);
+        applyStyle();
+        if (data) render(data);
+      });
+    }
+    if (typeof mb.onLyricState === 'function') {
+      mb.onLyricState((st) => {
+        if (!st) return;
+        if (typeof st.clickThrough === 'boolean') {
+          locked = st.clickThrough;
+          document.body.classList.toggle('locked', locked);
+          document.getElementById('t-lock').classList.toggle('on', locked);
+        }
+      });
+    }
+    // 窗口刚创建时主动拉一次，避免要等下一句歌词才显示
+    if (typeof mb.lyricGetStyle === 'function') {
+      mb.lyricGetStyle().then(st => {
+        if (st) { style = Object.assign(style, st); applyStyle(); if (data) render(data); }
+      }).catch(() => {});
+    }
+    if (typeof mb.lyricGetData === 'function') {
+      mb.lyricGetData().then(d => { if (d) render(d); }).catch(() => {});
+    }
+  }
+
+  function act(a) { if (mb && typeof mb.lyricAction === 'function') mb.lyricAction(a); }
+  document.getElementById('t-font-down').addEventListener('click', () => act('scale-down'));
+  document.getElementById('t-font-up').addEventListener('click', () => act('scale-up'));
+  document.getElementById('t-lock').addEventListener('click', () => act('lock'));
+  document.getElementById('t-close').addEventListener('click', () => act('close'));
+
+  // 右键 → 主进程弹系统原生菜单。任务栏模式下窗口只有 40px 高，
+  // 自绘面板会被窗口边界裁掉，所以这里必须走原生菜单。
+  window.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    if (mb && typeof mb.lyricContextMenu === 'function') mb.lyricContextMenu();
+  });
+  // 双击：桌面模式 → 任务栏（顺手做，不占菜单位置）
+  box.addEventListener('dblclick', () => {
+    if (mode === 'desktop') act('taskbar');
+  });
+  window.addEventListener('resize', applyFont);
+  applyStyle();
+})();
+</script>
+</body>
+</html>

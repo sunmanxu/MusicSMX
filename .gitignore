@@ -1,0 +1,33 @@
+# 依赖与构建产物（可重建，别提交）
+node_modules/
+release/
+release-*/
+
+# 运行时数据（曲库路径、收藏、歌单、设置——属于使用者，不该进仓库）
+userData/
+
+# 大体积二进制（84MB ffmpeg，README 有下载说明）
+bin/
+
+# 开发期钩子的输出
+.verify/
+.probe/
+.ui-review/
+.test-music/
+
+# 临时工作目录与杂项
+tmp-*/
+tmp-deleted-*/
+nul
+
+# 内部文档与个人清单（不公开）
+交接说明.md
+重复副本清单*.txt
+
+# 日志与临时文件
+*.log
+*.tmp
+win-unpacked.tmp/
+Thumbs.db
+desktop.ini
+.DS_Store

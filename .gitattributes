@@ -1,0 +1,9 @@
+# 行尾规范化：仓库统一 LF，工作区随平台
+* text=auto
+
+# Windows 批处理保持 CRLF，否则 cmd 解析可能出问题
+*.cmd text eol=crlf
+
+# 二进制
+*.png binary
+*.ico binary

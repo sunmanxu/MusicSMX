@@ -1,0 +1,67 @@
+{
+  "name": "musicsmx",
+  "version": "1.1.3",
+  "description": "MusicSMX - 本地音乐播放器（Electron + 原生前端，无框架）",
+  "main": "src/main.js",
+  "author": "Sunman & SMX",
+  "license": "MIT",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "build": "electron-builder --win",
+    "build:dir": "electron-builder --win --dir",
+    "check:radios": "node scripts/check-radios.js",
+    "gen:icon": "node scripts/gen-icon.js",
+    "gen:thumbar": "node scripts/gen-thumbar-icons.js",
+    "gen:testmusic": "node scripts/gen-test-music.js"
+  },
+  "dependencies": {
+    "hls.js": "^1.7.1",
+    "music-metadata": "^11.15.0"
+  },
+  "devDependencies": {
+    "electron": "^37.10.3",
+    "electron-builder": "^26.15.3"
+  },
+  "build": {
+    "appId": "com.musicsmx.player",
+    "productName": "MusicSMX",
+    "directories": {
+      "output": "release-v39",
+      "buildResources": "build"
+    },
+    "electronLanguages": [
+      "zh-CN",
+      "en-US"
+    ],
+    "files": [
+      "src/**/*",
+      "build/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "build",
+        "to": "build"
+      },
+      {
+        "from": "bin",
+        "to": "bin"
+      }
+    ],
+    "win": {
+      "icon": "build/icon.ico",
+      "target": [
+        "nsis"
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "MusicSMX",
+      "artifactName": "MusicSMX-${version}-setup.${ext}"
+    }
+  }
+}
