@@ -4,7 +4,7 @@
   "description": "MusicSMX - 本地音乐播放器（Electron + 原生前端，无框架）",
   "main": "src/main.js",
   "author": "Sunman & SMX",
-  "license": "MIT",
+  "license": "GPL-3.0-only",
   "private": true,
   "scripts": {
     "start": "electron .",
