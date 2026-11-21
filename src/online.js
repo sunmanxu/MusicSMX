@@ -1007,11 +1007,21 @@ async function searchSongInfoNetEase(artist, title, duration) {
       duration: (s.duration || s.dt || 0) / 1000
     }));
     if (!best) return null;
+    // 其余候选（songId + 标题/歌手）：免费链接获取时最佳匹配若只有试听片段，逐个再试
+    const candidates = songs
+      .filter((s) => s.id && s.id !== best.songId)
+      .slice(0, 4)
+      .map((s) => ({
+        songId: s.id,
+        title: s.name || '',
+        artist: (s.artists || []).map((x) => x.name).join(' / ')
+      }));
     return {
       title: best.title,
       artist: best.artist,
       album: best.album || '',
       songId: best.songId || null,
+      candidates,
       source: '网易云音乐',
       confidence: Math.min(1, (best._titleScore * 0.6 + best._artistScore * 0.4))
     };
@@ -1205,6 +1215,16 @@ async function getFreeDownloadLink(artist, title, duration) {
   for (const [key, plat] of order) {
     const r = results[key];
     if (r && r.ok && !r.trial) return { ok: true, platform: plat, url: r.url, br: r.br || 0 };
+  }
+  // 网易云最佳匹配只有试听片段时：把其余候选逐个再试（同一首歌常有免试听的版本）
+  if (results.ne && results.ne.trial && neInfo && Array.isArray(neInfo.candidates)) {
+    for (const c of neInfo.candidates) {
+      if (!c.songId) continue;
+      const r = await getNeteaseDownloadUrl(c.songId).catch(() => null);
+      if (r && r.ok && !r.trial) {
+        return { ok: true, platform: '网易云音乐', url: r.url, br: r.br || 0, viaCandidate: c.title };
+      }
+    }
   }
   for (const [key, plat] of order) {
     const r = results[key];

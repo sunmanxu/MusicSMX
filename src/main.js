@@ -392,6 +392,8 @@ let lyricTaskbarX = null;   // 任务栏模式：用户拖到的左上角 x（�
 let lyricTaskbarCenter = null;
 let lyricDesktopPos = null; // 桌面模式：用户拖到的位置
 let lyricProgrammaticMove = 0;  // 程序自己 setBounds 时，抑制 moved 回调里的位置保存
+let lyricLastSetBounds = null;  // 程序最近一次 setBounds 的目标值：区分「自己摆的」和「系统改的」resize
+let lyricLastForeignResize = null; // 上一次触发重摆的「系统改的」bounds：防止系统持续回弹造成重摆循环
 let lyricDisplayId = null;      // 歌词窗当前所在显示器；跨屏时清掉旧 DPI 下量出的宽度/锚点
 let lyricDisplayChangeTimer = null; // 切屏事件防抖：等显示器几何稳定后再重摆一次
 
@@ -504,7 +506,13 @@ function lyricBounds(mode, display) {
 function applyLyricBounds(display) {
   if (!lyricWin || lyricWin.isDestroyed() || lyricMode === 'off') return;
   lyricProgrammaticMove++;
-  lyricWin.setBounds(lyricBounds(lyricMode, display));
+  const nb = lyricBounds(lyricMode, display);
+  // 记下目标值：稍后到达的 resize 事件若与它一致，是我们自己 setBounds 的回声，
+  // 别当成「系统改了窗口」去触发重摆（否则每次换歌词宽度都会白跑一轮防抖+闪一次）。
+  // 事件可能异步晚于 80ms 的 lyricProgrammaticMove 窗口，所以不能只靠那个计数器。
+  lyricLastSetBounds = { x: nb.x, y: nb.y, width: nb.width, height: nb.height };
+  lyricLastForeignResize = null; // 我们重新掌握了位置，旧的外部改动不再需要去重
+  lyricWin.setBounds(nb);
   setTimeout(() => { lyricProgrammaticMove = Math.max(0, lyricProgrammaticMove - 1); }, 80);
 }
 
@@ -635,10 +643,12 @@ function ensureLyricWindow(mode) {
     if (lyricMode === 'taskbar') {
       lyricTaskbarX = nb.x;
       lyricTaskbarCenter = nb.x + nb.width / 2;
-      const tb = taskbarRect(currentLyricDisplay());
-      // 拖出任务栏了（y 偏了 / 高度被改）→ 拉回来，任务栏歌词就该长在任务栏上
-      if (Math.abs(nb.y - Math.round(tb.y)) > 1 ||
-          nb.height !== Math.max(28, Math.round(tb.h))) {
+      const expect = lyricBounds('taskbar', currentLyricDisplay());
+      // 拖出任务栏了（x/y/宽/高任何一项偏离任务栏期望几何）→ 拉回来，
+      // 任务栏歌词就该长在任务栏上。旧检查只看 y/高度，过渡期系统把窗口
+      // 挪到屏幕外时 x/宽度变了却拉不回（2026-11-21 越界修复）。
+      if (Math.abs(nb.x - expect.x) > 1 || Math.abs(nb.y - expect.y) > 1 ||
+          Math.abs(nb.width - expect.width) > 1 || Math.abs(nb.height - expect.height) > 1) {
         applyLyricBounds();
       }
       notifyLyricState({ taskbarX: lyricTaskbarX });
@@ -652,6 +662,23 @@ function ensureLyricWindow(mode) {
     stopLyricTopGuard();
     // 用户直接在悬浮窗点 × 时，让主窗口按钮状态跟着熄灭
     if (win && !win.isDestroyed()) win.webContents.send('lyric-window-state', { closed: true });
+  });
+  // 系统在 2K↔4K 切换的过渡期会**自己** resize 歌词窗（innerHeight 实测出现过
+  // 28/47/64 的中间值），而且这些改动往往**不伴随** display-metrics-changed 事件
+  // —— 旧代码只有显示器事件才重摆，高度就停在过渡值上：40px 任务栏被撑成 47px，
+  // 任务栏双行文字按 47px 排版，下排下半截掉出屏幕底边（2026-11-21 用户反馈）。
+  // 这里把「非我们自己 setBounds 引起的 resize」也纳入同一个 450ms 防抖重摆流程，
+  // 几何稳定后按当前显示器重新夹一次。自己摆的（回声 = 与 lyricLastSetBounds 一致）
+  // 直接忽略，否则每次换歌词宽度都会白白隐身闪一轮。
+  lyricWin.on('resize', () => {
+    if (lyricMode === 'off') return;
+    const b = lyricWin.getBounds();
+    const same = (p, q) => p && Math.abs(p.x - q.x) <= 1 && Math.abs(p.y - q.y) <= 1 &&
+      Math.abs(p.width - q.width) <= 1 && Math.abs(p.height - q.height) <= 1;
+    if (same(lyricLastSetBounds, b)) return;           // 我们自己 setBounds 的回声
+    if (same(lyricLastForeignResize, b)) return;       // 同一个外部改动只处理一次，防回弹循环
+    lyricLastForeignResize = { x: b.x, y: b.y, width: b.width, height: b.height };
+    handleLyricDisplayChange();
   });
 }
 
@@ -1044,6 +1071,15 @@ function applyLyricDisplayChange() {
     if (lyricWin && !lyricWin.isDestroyed() && lyricMode !== 'off') {
       lyricWin.webContents.send('lyric-scale', lyricScale);
       lyricWin.webContents.send('lyric-style', lyricStyle);
+      // 自检兜底：刚才重摆用的若还是过渡期几何（workArea 抖动的中间值），实际
+      // bounds 会与稳定后的期望不符 —— 不一致就按当前显示器再夹一次，确保
+      // 贴回任务栏、不出屏（2026-11-21 越界修复的最后一道闸）。
+      const b = lyricWin.getBounds();
+      const exp = lyricBounds(lyricMode, currentLyricDisplay());
+      if (Math.abs(b.x - exp.x) > 1 || Math.abs(b.y - exp.y) > 1 ||
+          Math.abs(b.width - exp.width) > 1 || Math.abs(b.height - exp.height) > 1) {
+        applyLyricBounds(currentLyricDisplay());
+      }
       keepLyricOnTop();
       // 若期间又来了新的切屏事件，会让 timer 重新排队；这里只在没有待处理
       // 事件时恢复，避免刚恢复又立刻隐藏造成闪烁。
