@@ -221,6 +221,7 @@ let miniFadeTimer = null;       // 迷你窗透明度渐变动画的定时器（
 let latestPlayerState = { title: '', artist: '', cover: '', playing: false, volume: 0.05, muted: false, mode: 'list', fav: false, lyric: false }; // 渲染进程上报的最新状态，供小窗取用
 let latestMiniTheme = null; // 渲染进程推来的主题变量（accent/底色/文字色），小窗创建时补发，保证颜色跟主界面一致
 let thumbarPlaying = null;   // 上一次同步到任务栏缩略图的播放状态（null 表示还没建过）
+let thumbarFav = null;       // 上一次同步到任务栏缩略图的收藏状态（红心图标随它切换）
 // 点关闭按钮时是否最小化到托盘（渲染进程通过 settings.closeToTray 同步过来）
 let closeToTray = true;
 
@@ -277,6 +278,7 @@ function createWindow() {
   win.setMenuBarVisibility(false);
   win.removeMenu();
   thumbarPlaying = null;
+  thumbarFav = null;
   win.once('ready-to-show', () => {
     win.show();
     updateThumbar(false);
@@ -390,10 +392,21 @@ let lyricTaskbarX = null;   // 任务栏模式：用户拖到的左上角 x（�
 // 用左边界锚定的话宽度一变、居中显示的文字就整体横移 —— 用户看到的
 // 「新唱到的一句突然位移一段距离」有一半是它造成的。
 let lyricTaskbarCenter = null;
+// 任务栏歌词水平平移（2026-11-21）：默认贴任务栏正中，但 Win11 居中图标 /
+// 小组件会占住中间，用户需要手动往左/右挪。单位 DIP px，仅作用在
+// 「自动居中」分支上——用户拖过（lyricTaskbarCenter/X 非空）以拖动为准。
+let lyricTaskbarOffset = 0;
 let lyricDesktopPos = null; // 桌面模式：用户拖到的位置
+// 手动拖动（2026-11-21）：歌词窗不再用 -webkit-app-region: drag——那种区域上
+// **所有鼠标事件都不进页面**，右键直接被 Windows 拿去弹系统菜单（还原/移动/大小/
+// 最小化/最大化/关闭），我们自己的右键菜单永远弹不出来。改为渲染端 pointer 事件
+// 流式上报光标坐标、主进程这里 setBounds 跟随：与原生拖动等效，右键/双击全部恢复。
+let lyricDragOffset = null; // 拖动中：{x, y} = 光标屏幕坐标 → 窗口左上角的偏移
 let lyricProgrammaticMove = 0;  // 程序自己 setBounds 时，抑制 moved 回调里的位置保存
 let lyricLastSetBounds = null;  // 程序最近一次 setBounds 的目标值：区分「自己摆的」和「系统改的」resize
 let lyricLastForeignResize = null; // 上一次触发重摆的「系统改的」bounds：防止系统持续回弹造成重摆循环
+let lyricGeomGuardTimer = null;   // 几何守卫心跳：2s 一次不变量巡检（不依赖任何事件）
+let lyricLastForeignMoveAt = 0;   // 最近一次外部移动/拖动的时间：拖动中暂停守卫，防止打断用户
 let lyricDisplayId = null;      // 歌词窗当前所在显示器；跨屏时清掉旧 DPI 下量出的宽度/锚点
 let lyricDisplayChangeTimer = null; // 切屏事件防抖：等显示器几何稳定后再重摆一次
 
@@ -475,19 +488,26 @@ function lyricBounds(mode, display) {
     const want = lyricFitW > 0 ? lyricFitW : 420;
     const w = Math.max(150, Math.min(Math.round(want), maxW));
     // 位置以「文字中心」为锚：宽度变化时窗口左右对称扩缩，居中显示的文字原地不动。
+    // 手动拖过（center/X 非空）以拖动位置为准；否则自动居中 + 用户设置的平移偏移。
+    const manual = lyricTaskbarCenter != null || lyricTaskbarX != null;
     let center;
     if (lyricTaskbarCenter != null) {
       center = lyricTaskbarCenter;
     } else if (lyricTaskbarX != null) {
       center = lyricTaskbarX + w / 2;
     } else {
-      // 默认摆在任务栏正中（2026-11-18 要求：以前默认靠右，飘在托盘边上很偏）。
-      center = tb.x + tb.w / 2;
+      // 默认摆在任务栏正中（2026-11-18 要求：以前默认靠右，飘在托盘边上很偏），
+      // 再叠加设置里的水平平移偏移（可正可负）。
+      center = tb.x + tb.w / 2 + lyricTaskbarOffset;
     }
     const x = Math.round(Math.max(tb.x, Math.min(tb.x + tb.w - w, center - w / 2)));
-    // clamp 之后实际中心可能与期望值不同（顶到任务栏边缘），以实际值为准，避免反复回弹
-    lyricTaskbarCenter = x + w / 2;
-    lyricTaskbarX = x;
+    // clamp 之后实际中心可能与期望值不同（顶到任务栏边缘），手动位置以实际值为准，
+    // 避免反复回弹；自动分支**不能回写**——回写会把 offset 烤进 lyricTaskbarCenter，
+    // 之后的重摆（含几何守卫心跳）就再也不会叠加偏移了（偏移只生效一次的 bug）。
+    if (manual) {
+      lyricTaskbarCenter = x + w / 2;
+      lyricTaskbarX = x;
+    }
     return { width: w, height: h, x, y: Math.round(tb.y) };
   }
   // 桌面模式：一块固定画布承载两行（双行原位交替，不需要更宽的滑道）
@@ -514,6 +534,35 @@ function applyLyricBounds(display) {
   lyricLastForeignResize = null; // 我们重新掌握了位置，旧的外部改动不再需要去重
   lyricWin.setBounds(nb);
   setTimeout(() => { lyricProgrammaticMove = Math.max(0, lyricProgrammaticMove - 1); }, 80);
+}
+
+// ---------- 几何守卫心跳 ----------
+// 事件驱动的重摆（display-metrics-changed / resize / moved）有一类死角：切屏过渡期
+// Windows 分多步改 workArea（实测 1400→1393→1400），若 450ms+120ms 两次重摆都恰好
+// 落在过渡值 1393（任务栏被算成 47px），就把 47 烤进了 lyricLastSetBounds——之后
+// 窗口与目标一致、再无任何事件，就永远死在越界状态（2026-11-21 二次反馈）。
+// 所以这里用低频心跳做不变量巡检：实测 bounds 与「按当前显示器算出的期望几何」
+// 不符就静默纠正。拖动中 / 程序重摆中 / 切屏过渡期 / 45s 内的过渡自检期自动让路。
+function lyricGeometryGuardTick() {
+  if (!lyricWin || lyricWin.isDestroyed() || lyricMode === 'off') return;
+  if (lyricProgrammaticMove > 0) return;
+  if (lyricDisplayChangeTimer) return;                 // 切屏防抖重摆在排队，交给它
+  if (Date.now() - lyricLastForeignMoveAt < 1500) return; // 用户正拖动 / 刚发生外部移动
+  const b = lyricWin.getBounds();
+  const d = currentLyricDisplay();
+  const exp = lyricBounds(lyricMode, d);
+  if (Math.abs(b.x - exp.x) > 1 || Math.abs(b.y - exp.y) > 1 ||
+      Math.abs(b.width - exp.width) > 1 || Math.abs(b.height - exp.height) > 1) {
+    applyLyricBounds(d);
+  }
+}
+function startLyricGeomGuard() {
+  stopLyricGeomGuard();
+  if (lyricMode === 'off') return;
+  lyricGeomGuardTimer = setInterval(lyricGeometryGuardTick, 2000);
+}
+function stopLyricGeomGuard() {
+  if (lyricGeomGuardTimer) { clearInterval(lyricGeomGuardTimer); lyricGeomGuardTimer = null; }
 }
 
 // Windows 任务栏（Shell_TrayWnd）会在鼠标划过、窗口激活、系统通知等时机
@@ -639,6 +688,8 @@ function ensureLyricWindow(mode) {
   lyricWin.on('moved', () => {
     if (lyricProgrammaticMove > 0) return;
     if (!lyricWin || lyricWin.isDestroyed()) return;
+    // 外部移动（用户拖动 / 系统挪动）刚发生：守卫心跳让路，避免打断拖拽循环
+    lyricLastForeignMoveAt = Date.now();
     const nb = lyricWin.getBounds();
     if (lyricMode === 'taskbar') {
       lyricTaskbarX = nb.x;
@@ -660,6 +711,9 @@ function ensureLyricWindow(mode) {
     lyricWin = null;
     lyricMode = 'off';
     stopLyricTopGuard();
+    stopLyricGeomGuard();
+    // 歌词没了，迷你控制条也一起收（点叉号关闭歌词的场景）
+    hideLyricRemote();
     // 用户直接在悬浮窗点 × 时，让主窗口按钮状态跟着熄灭
     if (win && !win.isDestroyed()) win.webContents.send('lyric-window-state', { closed: true });
   });
@@ -690,12 +744,14 @@ function applyLyricMode(mode) {
   syncLyricMetricsForMode();
   if (mode === 'off') {
     stopLyricTopGuard();
+    stopLyricGeomGuard();
     if (lyricWin && !lyricWin.isDestroyed()) lyricWin.close();
     return;
   }
   ensureLyricWindow(mode);
   keepLyricOnTop();
   startLyricTopGuard();
+  startLyricGeomGuard();
 }
 
 function notifyLyricState(st) {
@@ -726,6 +782,49 @@ ipcMain.handle('lyric-get-data', () => lastLyricData);
 ipcMain.on('lyric-mode', (e, mode) => { applyLyricMode(mode); });
 ipcMain.on('lyric-scale', (e, v) => { pushLyricScale(v); });
 
+// 任务栏歌词水平平移（设置菜单滑块实时调节）：
+// 第二个参数 reset=true 表示「用户在主动调」——清掉手动拖动位置，
+// 让平移从「自动居中 + 偏移」重新生效；启动同步（reset 缺省）不清。
+ipcMain.on('lyric-offset', (e, v, reset) => {
+  const n = Number(v);
+  if (isFinite(n)) lyricTaskbarOffset = Math.max(-600, Math.min(600, Math.round(n)));
+  if (reset) {
+    lyricTaskbarCenter = null;
+    lyricTaskbarX = null;
+  }
+  applyLyricBounds();
+  keepLyricOnTop();
+});
+
+// 歌词窗手动拖动（渲染端 pointer 事件驱动，见 lyricDragOffset 注释）。
+// 直接 setBounds（不走 applyLyricBounds）→ moved 事件照常触发、
+// lyricProgrammaticMove === 0 → moved 处理器把它当用户拖动记录位置：
+// 任务栏模式存 lyricTaskbarCenter/X（y 被拉回贴任务栏），桌面模式存 lyricDesktopPos，
+// 与原生 app-region 拖动的行为完全一致。
+ipcMain.on('lyric-drag', (e, st) => {
+  if (!lyricWin || lyricWin.isDestroyed() || lyricMode === 'off') return;
+  if (!st || typeof st !== 'object') return;
+  if (st.event === 'start') {
+    const b = lyricWin.getBounds();
+    const sx = Number(st.screenX), sy = Number(st.screenY);
+    if (!isFinite(sx) || !isFinite(sy)) return;
+    lyricDragOffset = { x: sx - b.x, y: sy - b.y };
+  } else if (st.event === 'move' && lyricDragOffset) {
+    const b = lyricWin.getBounds();
+    const sx = Number(st.screenX), sy = Number(st.screenY);
+    if (!isFinite(sx) || !isFinite(sy)) return;
+    let nx = Math.round(sx - lyricDragOffset.x);
+    let ny = Math.round(sy - lyricDragOffset.y);
+    // 夹在歌词所在显示器范围内：拖不出屏幕、也不会丢到另一块屏上
+    const bd = currentLyricDisplay().bounds;
+    nx = Math.max(bd.x - 8, Math.min(bd.x + bd.width - b.width + 8, nx));
+    ny = Math.max(bd.y - 8, Math.min(bd.y + bd.height - b.height + 8, ny));
+    lyricWin.setBounds({ x: nx, y: ny, width: b.width, height: b.height });
+  } else if (st.event === 'end') {
+    lyricDragOffset = null;
+  }
+});
+
 // 主窗口启动时把「两套」字号 / 透明度一次性同步过来（配置的唯一真源在主窗口，
 // 主进程只负责按当前模式挑一份用）。少发一份的话重启后桌面/任务栏就互相串了。
 ipcMain.on('lyric-metrics', (e, payload) => {
@@ -736,6 +835,10 @@ ipcMain.on('lyric-metrics', (e, payload) => {
     if (isFinite(Number(sc[k]))) lyricScales[k] = clampLyricScale(sc[k]);
     if (isFinite(Number(op[k]))) lyricOpacities[k] = clampLyricOpacity(op[k]);
   });
+  // 启动时同步任务栏水平平移偏移（reset 不带 true：别清掉可能已恢复的手动位置）
+  if (isFinite(Number(payload.taskbarOffset))) {
+    lyricTaskbarOffset = Math.max(-600, Math.min(600, Math.round(Number(payload.taskbarOffset))));
+  }
   syncLyricMetricsForMode();
   if (lyricWin && !lyricWin.isDestroyed()) {
     lyricWin.webContents.send('lyric-scale', lyricScale);
@@ -850,6 +953,79 @@ const LYRIC_BGS = [
   { id: 'dark', label: '深色底' }
 ];
 
+// ── 歌词迷你控制条（2026-11-21）─────────────────────────────
+// 右键任务栏/桌面歌词时弹出：一条复刻任务栏缩略图工具栏观感的
+// 深色圆角小条（⏮ ⏯ ⏭ ♥ ✕），替代原生的长右键菜单。
+// Windows 的缩略图弹层无法由应用主动弹出，这里用无边框透明小窗实现同款观感。
+let lyricRemoteWin = null;
+
+function ensureLyricRemoteWin() {
+  if (lyricRemoteWin && !lyricRemoteWin.isDestroyed()) return lyricRemoteWin;
+  lyricRemoteWin = new BrowserWindow({
+    width: 262,
+    height: 56,
+    frame: false,
+    resizable: false,
+    movable: false,
+    minimizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    skipTaskbar: true,
+    transparent: true,
+    show: false,
+    hasShadow: false,
+    backgroundColor: '#00000000',
+    webPreferences: {
+      preload: path.join(__dirname, 'lyric-remote-preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      webSecurity: true
+    }
+  });
+  lyricRemoteWin.setMenuBarVisibility(false);
+  lyricRemoteWin.removeMenu();
+  lyricRemoteWin.loadFile(path.join(__dirname, 'renderer', 'lyric-remote.html'));
+  // 要盖过歌词窗（歌词窗本身有 top guard 定时保顶，用更高层级压住）
+  lyricRemoteWin.setAlwaysOnTop(true, 'screen-saver');
+  // 失焦自动收起：点控制条以外的任何地方（含歌词窗、主窗口）都收起。
+  // 点控制条内部按钮焦点仍在本窗不会触发 blur，无-extra 守卫需要。
+  lyricRemoteWin.on('blur', () => {
+    if (lyricRemoteWin && !lyricRemoteWin.isDestroyed() && lyricRemoteWin.isVisible()) {
+      lyricRemoteWin.hide();
+    }
+  });
+  lyricRemoteWin.on('closed', () => { lyricRemoteWin = null; });
+  return lyricRemoteWin;
+}
+
+function hideLyricRemote() {
+  if (lyricRemoteWin && !lyricRemoteWin.isDestroyed() && lyricRemoteWin.isVisible()) {
+    lyricRemoteWin.hide();
+  }
+}
+
+function showLyricRemote() {
+  if (!lyricWin || lyricWin.isDestroyed() || lyricMode === 'off') return;
+  const rw = ensureLyricRemoteWin();
+  // 定位：歌词窗正上方居中；上方放不下（顶部任务栏场景）改放下方
+  const lb = lyricWin.getBounds();
+  const display = currentLyricDisplay();
+  const wa = display.workArea;
+  const rb = rw.getBounds();
+  const rwW = rb.width, rwH = rb.height;
+  let x = Math.round(lb.x + lb.width / 2 - rwW / 2);
+  let y = Math.round(lb.y - rwH - 10);
+  if (y < wa.y) y = Math.round(lb.y + lb.height + 10);
+  x = Math.max(wa.x, Math.min(wa.x + wa.width - rwW, x));
+  rw.setBounds({ x, y, width: rwW, height: rwH });
+  if (!rw.isVisible()) {
+    rw.show();
+    rw.focus();
+  }
+  // 弹出即按最新状态渲染（playing/fav 图标）
+  rw.webContents.send('remote-state', latestPlayerState);
+}
+
 function showLyricContextMenu() {
   if (!lyricWin || lyricWin.isDestroyed()) return;
   const key = lyricMetricKey();
@@ -858,9 +1034,23 @@ function showLyricContextMenu() {
   const isTaskbar = lyricMode === 'taskbar';
   const modeName = isTaskbar ? '任务栏' : '桌面';
   try {
+  // 播放控制区（2026-11-21）：把任务栏缩略图的四键 + 歌词键搬进右键菜单。
+  // 状态读主进程缓存的 latestPlayerState（渲染端每次 reportPlayerState 都会上报），
+  // 控制指令走 tray-control 通道（与托盘小窗/缩略图同一条，主窗口收到后真实执行）——
+  // 主窗口最小化也能用，不用把它唤到前台。
+  const sendTray = (action, value) => {
+    if (win && !win.isDestroyed()) win.webContents.send('tray-control', action, value);
+  };
+  const ps = latestPlayerState || {};
   const template = [
     // 标题里带上模式：这两套字号/透明度是独立的，不写清楚用户会以为「调了没生效」
     { label: `MusicSMX 歌词 · ${modeName} · 字号 ${pct}% · 不透明度 ${opPct}%`, enabled: false },
+    { label: '上一首', click: () => sendTray('prev') },
+    { label: ps.playing ? '暂停' : '播放', click: () => sendTray('toggle-play') },
+    { label: '下一首', click: () => sendTray('next') },
+    { label: ps.fav ? '♥ 取消收藏' : '♡ 收藏这首歌', click: () => sendTray('toggle-fav') },
+    { label: '歌词（点击关闭）', click: () => sendTray('toggle-lyric') },
+    { type: 'separator' },
     {
       label: '字号（仅本模式）',
       submenu: [
@@ -1005,7 +1195,12 @@ function requestLyricAlign(where) {
   notifyLyricState({ taskbarX: lyricTaskbarX });
 }
 
-ipcMain.on('lyric-context-menu', () => { showLyricContextMenu(); });
+// 右键歌词 → 迷你控制条（2026-11-21 用户要求：不要长菜单，只要缩略图那排小按钮 + 关闭叉）。
+// 原生菜单 showLyricContextMenu() 保留未删，需要回退把 handler 换回去即可。
+ipcMain.on('lyric-context-menu', () => { showLyricRemote(); });
+
+// 迷你控制条收起（点叉号后自请求 / 歌词窗关闭时主动收）
+ipcMain.on('lyric-remote-hide', () => { hideLyricRemote(); });
 
 // 分辨率 / 缩放 / 任务栏位置变了就重算窗口位置（只需绑一次）。
 // 注意：screen 模块必须等 app ready 之后才能用，顶层直接 screen.on 会让主进程
@@ -1086,6 +1281,18 @@ function applyLyricDisplayChange() {
       if (!lyricDisplayChangeTimer) {
         try { lyricWin.setOpacity(1); } catch (e) { /* 窗口正在销毁 */ }
       }
+      // 二次自检：120ms 时 workArea 可能仍是过渡值（两次重摆都烤进过渡几何），
+      // 800ms 后系统大多已稳定——不一致再夹一次，比 2s 守卫心跳更快收口。
+      setTimeout(() => {
+        if (!lyricWin || lyricWin.isDestroyed() || lyricMode === 'off') return;
+        if (lyricDisplayChangeTimer || lyricProgrammaticMove > 0) return;
+        const b2 = lyricWin.getBounds();
+        const exp2 = lyricBounds(lyricMode, currentLyricDisplay());
+        if (Math.abs(b2.x - exp2.x) > 1 || Math.abs(b2.y - exp2.y) > 1 ||
+            Math.abs(b2.width - exp2.width) > 1 || Math.abs(b2.height - exp2.height) > 1) {
+          applyLyricBounds(currentLyricDisplay());
+        }
+      }, 800);
     }
   }, 120);
   keepLyricOnTop();
@@ -1114,11 +1321,13 @@ function loadThumbarIcon(name) {
   }
 }
 
-function updateThumbar(playing) {
+function updateThumbar(playing, fav) {
   if (!win || win.isDestroyed()) return;
   playing = !!playing;
-  if (thumbarPlaying === playing) return;
+  fav = !!fav;
+  if (thumbarPlaying === playing && thumbarFav === fav) return;
   thumbarPlaying = playing;
+  thumbarFav = fav;
   const send = (action) => {
     if (win && !win.isDestroyed()) win.webContents.send('tray-control', action);
   };
@@ -1126,7 +1335,9 @@ function updateThumbar(playing) {
     win.setThumbarButtons([
       { tooltip: '上一首', icon: loadThumbarIcon('prev'), click: () => send('prev') },
       { tooltip: playing ? '暂停' : '播放', icon: loadThumbarIcon(playing ? 'pause' : 'play'), click: () => send('toggle-play') },
-      { tooltip: '下一首', icon: loadThumbarIcon('next'), click: () => send('next') }
+      { tooltip: '下一首', icon: loadThumbarIcon('next'), click: () => send('next') },
+      // 红心：和托盘小窗同一个 toggle-fav 通道（渲染端已兜底：电台/无曲目时忽略）
+      { tooltip: fav ? '取消收藏' : '收藏', icon: loadThumbarIcon(fav ? 'fav-on' : 'fav-off'), click: () => send('toggle-fav') }
     ]);
   } catch (e) {
     // 窗口没有任务栏按钮（例如隐藏到托盘）时会失败，忽略。
@@ -1134,6 +1345,7 @@ function updateThumbar(playing) {
     // 状态变化会被「没变过」的预判挡掉，任务栏按钮图标永远停在旧档。
     console.error('[thumbar] setThumbarButtons 失败:', e && e.message);
     thumbarPlaying = null;
+    thumbarFav = null;
   }
 }
 
@@ -1495,8 +1707,12 @@ ipcMain.on('player-state', (e, state) => {
       // 导致小窗点播放后收不到新状态、播放键永远是播放图标。
       miniPlayer.webContents.send('mini-state', latestPlayerState);
     }
+    // 歌词迷你控制条同步（⏯/♥ 图标实时跟随）
+    if (lyricRemoteWin && !lyricRemoteWin.isDestroyed()) {
+      lyricRemoteWin.webContents.send('remote-state', latestPlayerState);
+    }
   }
-  updateThumbar(state && state.playing);
+  updateThumbar(!!(state && state.playing), !!(state && state.fav));
 });
 
 // 迷你窗按钮 → 转发到主窗口的播放控制（复用 tray-control 通道）

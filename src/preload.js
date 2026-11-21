@@ -114,6 +114,9 @@ try {
     setLyricScale: (v) => ipcRenderer.send('lyric-scale', v),
     // 桌面 / 任务栏两套字号 + 透明度一起同步（切模式时主进程按模式挑一份用）
     setLyricMetrics: (payload) => ipcRenderer.send('lyric-metrics', payload),
+    // 任务栏歌词水平平移（px，可负）。reset=true 表示用户在滑块上主动调，
+    // 主进程会清掉手动拖动位置让偏移重新生效；启动同步不带 reset。
+    setLyricOffset: (v, reset) => ipcRenderer.send('lyric-offset', v, !!reset),
     onLyricWindowState: (cb) => {
       ipcRenderer.on('lyric-window-state', (_e, st) => cb(st));
     },
@@ -143,6 +146,9 @@ try {
     lyricAlign: (where) => ipcRenderer.send('lyric-align', where),
     // 右键 → 主进程弹系统原生菜单（任务栏模式的窗口太矮，自绘面板会被裁掉）
     lyricContextMenu: () => ipcRenderer.send('lyric-context-menu'),
+    // 手动拖动（替代 -webkit-app-region: drag——那种区域上右键会弹 Windows 系统菜单）
+    // st = { event: 'start'|'move'|'end', screenX, screenY }（渲染端光标屏幕坐标）
+    lyricDrag: (st) => ipcRenderer.send('lyric-drag', st),
     version: '1.0.6'
   };
 

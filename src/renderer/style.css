@@ -127,7 +127,14 @@ body.popover-open #topbar { -webkit-app-region: no-drag; }
   font-weight: 600;
   font-size: 15px;
   color: var(--accent);
+  /* 点击跳 GitHub 项目主页（2026-11-21）：给个可点的暗示 */
+  cursor: pointer;
+  border-radius: 8px;
+  padding: 2px 6px;
+  margin: -2px -6px;   /* 补回 padding 占的位置，布局不挪 */
+  transition: background 0.15s ease;
 }
+.logo:hover { background: rgba(255, 255, 255, 0.08); }
 .logo-icon {
   width: 26px;
   height: 26px;
@@ -1053,7 +1060,21 @@ body.dragging #content::after {
 #cover img { width: 100%; height: 100%; object-fit: cover; }
 #cover .cover-fallback { color: var(--text-faint); font-size: 20px; }
 .now-text { overflow: hidden; min-width: 0; flex: 1; }
+/* 页脚左下角歌名/歌手/专辑可点跳网页（2026-11-21）：按钮还原成文字外观 */
+.now-link {
+  background: none;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: color 0.12s;
+}
+.now-link:hover { color: var(--accent); }
 #now-title {
+  width: 100%;
   font-size: 13px;
   font-weight: 600;
   overflow: hidden;
@@ -1068,15 +1089,27 @@ body.dragging #content::after {
   flex-shrink: 0;
   opacity: 0.7;
 }
-#now-artist {
+.now-sub {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  margin-top: 2px;
+  min-width: 0;
+  overflow: hidden;
+}
+#now-artist, #now-album {
   font-size: 11.5px;
   color: var(--text-dim);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  margin-top: 2px;
   line-height: 1.4;
+  min-width: 0;
+  flex: 0 1 auto;
 }
+#now-artist { flex-shrink: 1; }
+#now-album { flex-shrink: 3; } /* 专辑优先截断，歌手尽量保全 */
+.now-sep { font-size: 11.5px; color: var(--text-dim); flex-shrink: 0; }
 
 .controls { display: flex; flex-direction: column; align-items: center; gap: 2px; min-width: 0; height: 100%; justify-content: center; }
 .btns { display: flex; align-items: center; gap: 4px; }
@@ -1290,11 +1323,12 @@ body.dragging #content::after {
   box-shadow: 0 8px 32px rgba(0,0,0,0.6);
 }
 
-/* 滚动条 */
+/* 滚动条：常显（2026-11-22 用户定稿：不做滚动才出现的淡化态，
+   一直用明显色，hover 更亮一档） */
 ::-webkit-scrollbar { width: 9px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: var(--bg-elev2); border-radius: 5px; }
-::-webkit-scrollbar-thumb:hover { background: var(--text-faint); }
+::-webkit-scrollbar-thumb { background: var(--text-faint); border-radius: 5px; }
+::-webkit-scrollbar-thumb:hover { background: var(--text-dim); }
 
 /* ===== 响应式：窄窗口优化 ===== */
 @media (max-width: 1200px) {
@@ -2284,6 +2318,10 @@ body.dragging #content::after {
   position: fixed;
   z-index: 2600;
   min-width: 160px;
+  /* 超长菜单（批量加入歌单等）不再被屏幕底边裁掉：限高 + 内部滚动 */
+  max-height: min(72vh, 640px);
+  overflow-y: auto;
+  overflow-x: hidden;
   background: var(--bg-elev);
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -2296,6 +2334,10 @@ body.dragging #content::after {
   position: fixed;
   z-index: 2600;
   min-width: 160px;
+  /* 同上：超长时限高滚动 */
+  max-height: min(72vh, 640px);
+  overflow-y: auto;
+  overflow-x: hidden;
   background: var(--bg-elev);
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -3613,7 +3655,8 @@ body.is-fullscreen .pf-top { padding-top: 14px; }
 .queue-hint { font-size: 11px; color: var(--text-faint); padding: 0 14px 8px; }
 .queue-list { flex: 1; overflow-y: auto; padding: 0 8px 10px; }
 .queue-list::-webkit-scrollbar { width: 6px; }
-.queue-list::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.12); border-radius: 3px; }
+.queue-list::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.38); border-radius: 3px; }
+.queue-list::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.55); }
 .queue-item {
   display: flex; align-items: center; gap: 8px;
   padding: 7px 8px; border-radius: 8px; cursor: pointer;

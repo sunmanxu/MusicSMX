@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; user-select: none; }
+  html, body { width: 100%; height: 100%; background: transparent; overflow: hidden; }
+  body { display: flex; align-items: center; justify-content: center; }
+  /* 深色圆角控制条：复刻 Windows 任务栏缩略图工具栏的观感 */
+  #bar {
+    display: flex; align-items: center; gap: 4px;
+    padding: 7px 10px;
+    background: rgba(32, 32, 32, 0.96);
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    border-radius: 12px;
+    box-shadow: 0 6px 24px rgba(0, 0, 0, 0.5);
+  }
+  .rbtn {
+    width: 42px; height: 34px;
+    border: none; border-radius: 8px;
+    background: transparent;
+    color: #e8e8e8;
+    font-size: 15px; line-height: 1;
+    cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    transition: background 0.12s ease, color 0.12s ease;
+    font-family: 'Segoe UI Symbol', 'Segoe MDL2 Assets', sans-serif;
+  }
+  .rbtn:hover { background: rgba(255, 255, 255, 0.12); }
+  .rbtn:active { background: rgba(255, 255, 255, 0.2); }
+  /* 播放键稍大（缩略图工具栏里中间键也是视觉重心） */
+  .rbtn.play { font-size: 17px; }
+  /* 红心：更大更醒目（2026-11-21 用户要求放大） */
+  .rbtn.fav { width: 46px; height: 36px; font-size: 19px; }
+  /* 红心激活：实心红 */
+  .rbtn.fav-on { color: #ff5252; }
+  /* 叉号：悬停提示红色，暗示关闭动作 */
+  .rbtn.close:hover { background: rgba(229, 57, 53, 0.85); color: #fff; }
+</style>
+</head>
+<body>
+  <div id="bar">
+    <button class="rbtn" id="rb-prev">&#9198;</button>
+    <button class="rbtn play" id="rb-play">&#9654;</button>
+    <button class="rbtn" id="rb-next">&#9197;</button>
+    <button class="rbtn fav" id="rb-fav">&#9825;</button>
+    <button class="rbtn close" id="rb-close">&#10005;</button>
+  </div>
+<script>
+'use strict';
+(function () {
+  const $ = (id) => document.getElementById(id);
+  const btnPlay = $('rb-play'), btnFav = $('rb-fav');
+
+  // 状态渲染：playing 切 播放/暂停 图标，fav 切 空心/实心 红心
+  // （所有按钮一律不加 title 悬浮备注：2026-11-22 用户明确要求）
+  function renderState(st) {
+    if (!st) return;
+    btnPlay.innerHTML = st.playing ? '&#9208;' : '&#9654;';   // ⏸ / ▶
+    btnFav.innerHTML = st.fav ? '&#9829;' : '&#9825;';        // ♥ / ♡
+    btnFav.classList.toggle('fav-on', !!st.fav);
+  }
+
+  if (window.remote) {
+    window.remote.onState(renderState);
+    $('rb-prev').addEventListener('click', () => window.remote.control('prev'));
+    btnPlay.addEventListener('click', () => window.remote.control('toggle-play'));
+    $('rb-next').addEventListener('click', () => window.remote.control('next'));
+    btnFav.addEventListener('click', () => window.remote.control('toggle-fav'));
+    // 叉号 = 关闭歌词（渲染端收到后 setDesktopLyricMode('off')，歌词窗关闭 → 主进程顺带收起本条）
+    $('rb-close').addEventListener('click', () => {
+      window.remote.control('toggle-lyric');
+      window.remote.hide();
+    });
+  }
+})();
+</script>
+</body>
+</html>

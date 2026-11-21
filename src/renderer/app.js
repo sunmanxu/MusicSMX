@@ -2220,7 +2220,7 @@ function stopRadio() {
   $('cur-time').textContent = '0:00';
   $('dur-time').textContent = '0:00';
   $('now-title').textContent = '未在播放';
-  $('now-artist').textContent = '—';
+  setNowSub('—', '');
   updateRadioNowBar();
   renderRadioList();
   updateMediaSessionMeta();
@@ -2657,7 +2657,7 @@ async function playRadio(station) {
     setPlaying(true);
     // 更新显示
     $('now-title').textContent = station.cn ? `${station.name}（${station.cn}）` : station.name;
-    $('now-artist').textContent = station.category + ' · ' + station.subcat + ' 电台';
+    setNowSub(station.category + ' · ' + station.subcat + ' 电台', '');
     $('cover').innerHTML = `<div style="width:100%;height:100%;background:${station.color};display:flex;align-items:center;justify-content:center;font-size:24px;font-weight:700;color:#fff;">${station.name.charAt(0)}</div>`;
     // 隐藏进度条（电台直播无时长）
     $('seek').style.pointerEvents = 'none';
@@ -3158,7 +3158,7 @@ function markMissingTracks(gonePaths) {
     S.playing = false;
     setPlaying(false);
     $('now-title').textContent = '未播放';
-    $('now-artist').textContent = '';
+    setNowSub('', '');
     $('cover').innerHTML = '';
   }
   return marked;
@@ -4072,12 +4072,22 @@ function updateMediaSessionPosition() {
   } catch (e) { /* ignore */ }
 }
 
+// 页脚左下角副行（歌手 · 专辑）拆分写入：专辑为空时把分隔点一并藏掉。
+// 拆成两个可点元素是为了「点击跳网页详情」（2026-11-21 用户要求）。
+function setNowSub(artist, album) {
+  $('now-artist').textContent = artist || '—';
+  const al = (album || '').trim();
+  $('now-album').textContent = al;
+  $('now-sep').hidden = !al || !(artist || '').trim() || artist === '—';
+  $('now-album').hidden = !al;
+}
+
 function updateNowPlaying() {
   queueMicrotask(updateFloatButtons); // 当前曲目变化时刷新「定位到当前歌曲」按钮
   const t = S.current >= 0 ? S.tracks[S.current] : null;
   if (!t) {
     $('now-title').textContent = '未在播放';
-    $('now-artist').textContent = '—';
+    setNowSub('—', '');
     reportPlayerState();
     return;
   }
@@ -4093,7 +4103,7 @@ function updateNowPlaying() {
     badge.title = qInfo.title;
     $('now-title').appendChild(badge);
   }
-  $('now-artist').textContent = t.artist + ' · ' + t.album;
+  setNowSub(t.artist, t.album);
   const cover = $('cover');
   cover.textContent = '';
   if (t.cover) {
@@ -5068,6 +5078,62 @@ function nextTrack(auto) {
   playAt(found);
 }
 
+// ---- 无缝切歌预载（gapless-lite，借鉴 Cloudy）：当前歌剩最后 20 秒时，
+// 提前把下一首音频读进缓存，自然切歌时 load() 直接命中、几乎无停顿。 ----
+let gaplessAudio = null;
+let gaplessUrl = '';
+
+// 与 nextTrack 相同的决策逻辑，但只「偷看」不产生副作用（不动队列、不推进洗牌位置）
+function peekNextTrackPath() {
+  if (S.currentRadio) return '';
+  // 手动队列优先：队首第一条有效项就是下一首（无效项到时候会被 shift 掉）
+  for (const path of S.queue) {
+    const qi = S.tracks.findIndex(t => t.path === path);
+    if (qi >= 0 && !S.tracks[qi].isPlaceholder) return S.tracks[qi].path;
+  }
+  if (S.tracks.length === 0 || S.current < 0) return '';
+  if (S.mode === 'shuffle') {
+    ensureShuffleOrder();
+    const byPath = new Map(S.tracks.map(t => [t.path, t]));
+    const len = S.shuffleOrder.length;
+    if (!len) return '';
+    let pos = S.shufflePos + 1;
+    if (pos >= len) pos = 1; // 走完一轮时 nextTrack 会重洗并把刚播的放最前，这里保守按下一条估
+    for (let i = 0; i < len; i++) {
+      const p = (pos + i) % len;
+      const t = byPath.get(S.shuffleOrder[p]);
+      if (!t || t.isPlaceholder) continue;
+      if (t.path === S.tracks[S.current].path) continue;
+      return t.path;
+    }
+    return '';
+  }
+  // 顺序模式：跳过占位
+  const n = S.tracks.length;
+  for (let step = 0; step < n; step++) {
+    const idx = (S.current + 1 + step) % n;
+    if (!S.tracks[idx].isPlaceholder) return S.tracks[idx].path;
+  }
+  return '';
+}
+
+function maybePreloadNext() {
+  if (S.currentRadio) return;
+  if (!isFinite(audio.duration) || audio.duration <= 0) return;
+  if (audio.duration - audio.currentTime > 20) return;
+  const path = peekNextTrackPath();
+  if (!path) return;
+  const url = fileURL(path);
+  if (url === gaplessUrl) return;
+  gaplessUrl = url;
+  try {
+    if (!gaplessAudio) gaplessAudio = new Audio();
+    gaplessAudio.preload = 'auto';
+    gaplessAudio.src = url;
+    gaplessAudio.load();
+  } catch (e) { /* 预载失败不影响正常播放 */ }
+}
+
 function prevTrack() {
   // 电台模式：切换到上一个相邻电台
   if (S.currentRadio) {
@@ -5345,6 +5411,7 @@ audio.addEventListener('timeupdate', () => {
     updatePFLyricsHighlight();
   }
   updateMediaSessionPosition();
+  maybePreloadNext();
 });
 audio.addEventListener('loadedmetadata', () => {
   $('dur-time').textContent = fmtTime(audio.duration);
@@ -5861,11 +5928,13 @@ function applyPosterBgSetting() {
     return;
   }
   el.hidden = false;
-  // 表面半透明化：主背景 / 侧栏 / 播放栏统一同一透明占比（2026-11-20 用户反馈
-  // 侧栏比列表更实、视觉割裂），只有 elev2（滚动条 thumb 等小件）略实一点点。
-  root.setProperty('--bg', hexToRgba(base('--bg-base', '#12141a'), 1 - strength));
-  root.setProperty('--bg-elev', hexToRgba(base('--bg-elev-base', '#1a1d26'), 1 - strength));
-  root.setProperty('--bg-elev2', hexToRgba(base('--bg-elev2-base', '#222633'), 1 - strength * 0.85));
+  // 表面透明度策略（2026-11-22 用户定稿「保底直接调到 100%」）：氛围度滑块只管
+  // 氛围层浓度（setPosterBackground）+ 主背景 --bg 的透出度，控件表面一律不参与——
+  // --bg-elev / --bg-elev2 永远是实底基色（进度条轨道、半透明按钮、滚动条等不被
+  // 背景影响，拉满也不消失）。海报色只从主背景透出来。
+  root.setProperty('--bg', hexToRgba(base('--bg-base', '#12141a'), Math.max(0.12, 1 - strength)));
+  root.setProperty('--bg-elev', base('--bg-elev-base', '#1a1d26'));
+  root.setProperty('--bg-elev2', base('--bg-elev2-base', '#222633'));
   const t = S.current >= 0 ? S.tracks[S.current] : null;
   if (t && t.cover) {
     getBlurredBackground(t.cover).then(u => {
@@ -6426,6 +6495,12 @@ $('pf-title').addEventListener('click', () => pfOnlineJump('song'));
 $('pf-artist').addEventListener('click', () => pfOnlineJump('artist'));
 $('pf-album').addEventListener('click', () => pfOnlineJump('album'));
 
+// 页脚左下角（歌单/专辑/曲库页通用）：歌名 / 歌手 / 专辑同样可点跳网页详情。
+// 平台记忆（onlineJumpPlatform）与全屏页共用。电台模式没有对应曲目，忽略。
+$('now-title').addEventListener('click', () => { if (!S.currentRadio) pfOnlineJump('song'); });
+$('now-artist').addEventListener('click', () => { if (!S.currentRadio) pfOnlineJump('artist'); });
+$('now-album').addEventListener('click', () => { if (!S.currentRadio) pfOnlineJump('album'); });
+
 // 本地筛选（右键菜单用）：关全屏页并按歌手/专辑筛列表
 function pfFilterAndClose(field, value) {
   if (!value) return;
@@ -6648,6 +6723,12 @@ $('btn-sort').addEventListener('click', (e) => {
   e.stopPropagation();
   const menu = $('sort-menu');
   menu.hidden = !menu.hidden;
+});
+// 左上角 logo → GitHub 项目主页（2026-11-21）
+const GITHUB_REPO_URL = 'https://github.com/sunmanxu/MusicSMX';
+$('logo-home').addEventListener('click', (e) => {
+  e.stopPropagation();
+  if (window.mb && typeof mb.openExternal === 'function') mb.openExternal(GITHUB_REPO_URL);
 });
 document.addEventListener('click', (e) => {
   if (!e.target.closest('.sort-wrap')) {
@@ -7786,20 +7867,16 @@ renderBgPresets(); // 启动先铺预设色块（配置持久化，重启不丢�
   });
 })();
 
-// 外观浮窗：海报氛围强度滑块（0~100，拖动即预览，管氛围层浓度）
-$('tp-poster-opacity').addEventListener('input', (e) => {
-  const v = parseFloat(e.target.value);
-  S.settings.posterIntensity = isNaN(v) ? 1 : v / 100;
-  $('tp-poster-opacity-val').textContent = Math.round(posterIntensityVal() * 100) + '%';
-  applyPosterBgSetting();
-  saveConfig();
-});
-
-// 外观浮窗：界面透明度滑块（0~100，管界面表面透出多少海报）
+// 外观浮窗：海报氛围度滑块（0~100，拖动即预览）。
+// 2026-11-22 精简：原「海报氛围强度 + 界面透明度」两滑块合并为一个——
+// 同值双写 posterIntensity（氛围层浓度）与 uiTransparency（表面透出度），
+// 拖起来就是"氛围浓/淡"的一体调节，两个消费端不用改。
 $('tp-ui-opacity').addEventListener('input', (e) => {
   const v = parseFloat(e.target.value);
-  S.settings.uiTransparency = isNaN(v) ? 1 : v / 100;
-  $('tp-ui-opacity-val').textContent = Math.round(uiTransparencyVal() * 100) + '%';
+  const val = isNaN(v) ? 1 : Math.max(0, Math.min(1, v / 100));
+  S.settings.uiTransparency = val;
+  S.settings.posterIntensity = val;
+  $('tp-ui-opacity-val').textContent = Math.round(val * 100) + '%';
   applyPosterBgSetting();
   saveConfig();
 });
@@ -7819,10 +7896,7 @@ function syncBgModeUI() {
   const seg = $('bg-mode-seg');
   if (!seg) return;
   seg.querySelectorAll('button').forEach(b => b.classList.toggle('active', (b.dataset.mode === 'solid') !== posterBgOn()));
-  $('tp-poster-row').hidden = !posterBgOn();
   $('tp-ui-row').hidden = !posterBgOn();
-  $('tp-poster-opacity').value = String(Math.round(posterIntensityVal() * 100));
-  $('tp-poster-opacity-val').textContent = Math.round(posterIntensityVal() * 100) + '%';
   $('tp-ui-opacity').value = String(Math.round(uiTransparencyVal() * 100));
   $('tp-ui-opacity-val').textContent = Math.round(uiTransparencyVal() * 100) + '%';
 }
@@ -11556,6 +11630,13 @@ applyVolume();
       // 迁移改变了两把滑块的值：外观浮窗立即按新值重摆，别等下次打开才刷新
       syncBgModeUI();
     }
+    // 一次性合并（2026-11-22 两滑块并一）：海报氛围度 = 原界面透明度，
+    // 氛围层浓度跟随它（旧配置里两者不一致时以 uiTransparency 为准）
+    if (S.settings.posterIntensity !== S.settings.uiTransparency) {
+      S.settings.posterIntensity = S.settings.uiTransparency == null ? 1
+        : Math.max(0, Math.min(1, Number(S.settings.uiTransparency)));
+      saveConfig();
+    }
     // 一次性迁移：逐字歌词改为默认关（用户偏好整行一起点亮）。只翻一次，之后用户自己开关都算数
     if (S.settings.wordLyrics === true && S.settings.lyricWordOptOut !== true) {
       S.settings.wordLyrics = false;
@@ -11897,6 +11978,7 @@ function refreshDesktopLyricUI() {
     el.classList.toggle('active', el.dataset.mode === mode);
   });
   refreshLyricScaleUI();
+  refreshLyricOffsetUI();
   // 打开菜单时同步副行/逐字勾选：悬浮窗右键改过的值要从主进程镜像回来
   if (typeof syncLyricStyleUI === 'function') syncLyricStyleUI();
 }
@@ -11917,6 +11999,15 @@ function clampLyricScaleNum(v) {
 function clampLyricOpacityNum(v) {
   const n = Number(v);
   return Math.max(DL_OPACITY_MIN, Math.min(1, isFinite(n) ? n : 1));
+}
+// 任务栏歌词水平平移（2026-11-21）：S.settings.lyricTaskbarOffset，DIP px 可负。
+// 只作用在任务栏模式的「自动居中」分支；用户手动拖过的位置优先于偏移。
+function clampLyricOffsetNum(v) {
+  const n = Number(v);
+  return Math.max(-600, Math.min(600, isFinite(n) ? Math.round(n) : 0));
+}
+function lyricTaskbarOffsetValue() {
+  return clampLyricOffsetNum(S.settings.lyricTaskbarOffset);
 }
 function lyricMetricMap(name, fallback) {
   const cur = S.settings[name];
@@ -11975,6 +12066,24 @@ function setLyricOpacity(op, skipSave, mode) {
     lyricOpacitySaveTimer = setTimeout(() => { saveConfig(); }, 260);
   }
 }
+let lyricOffsetSaveTimer = null;
+function setLyricOffset(px, skipSave) {
+  const v = clampLyricOffsetNum(px);
+  S.settings.lyricTaskbarOffset = v;
+  const slider = $('dlm-offset');
+  const label = $('dlm-offset-val');
+  if (slider && document.activeElement !== slider) slider.value = String(v);
+  if (label) label.textContent = (v > 0 ? '+' : '') + v + 'px';
+  // 只有任务栏模式才实时推给主进程（桌面模式该值闲置，等切回任务栏时由 metrics 带过去）
+  if (lyricMetricKey() === 'taskbar' && window.mb && typeof mb.setLyricOffset === 'function') {
+    // reset=true：用户在主动调，清掉之前手动拖过的位置，让「自动居中+偏移」重新生效
+    mb.setLyricOffset(v, true);
+  }
+  if (!skipSave) {
+    clearTimeout(lyricOffsetSaveTimer);
+    lyricOffsetSaveTimer = setTimeout(() => { saveConfig(); }, 260);
+  }
+}
 // 切模式 / 启动时：把「两套」参数整份推给主进程（主进程按当前模式挑一份用）
 // 注意别再单独补一发 setLyricScale：主进程那一刻的模式可能还没切过来（还是 off），
 // 会把任务栏的字号写进桌面那一格里。
@@ -11985,7 +12094,8 @@ function applyLyricMetricsForMode() {
     if (typeof mb.setLyricMetrics === 'function') {
       mb.setLyricMetrics({
         scales: lyricMetricMap('lyricScales', { desktop: 0.7, taskbar: 1.4 }),
-        opacities: lyricMetricMap('lyricOpacities', { desktop: 0.5, taskbar: 0.5 })
+        opacities: lyricMetricMap('lyricOpacities', { desktop: 0.5, taskbar: 0.5 }),
+        taskbarOffset: lyricTaskbarOffsetValue()
       });
     }
     // 不再单独发 sendLyricStyle({opacity})：主进程此刻的模式可能还是旧的，
@@ -12209,6 +12319,24 @@ if ($('dlm-opacity')) {
     setLyricOpacity(Number(e.target.value) / 100);
   });
   $('dlm-opacity').addEventListener('click', (e) => e.stopPropagation());
+}
+// 水平平移滑块（仅任务栏模式显示；拖动实时生效，260ms 防抖落盘）
+if ($('dlm-offset')) {
+  $('dlm-offset').addEventListener('input', (e) => setLyricOffset(Number(e.target.value)));
+  $('dlm-offset').addEventListener('click', (e) => e.stopPropagation());
+}
+function refreshLyricOffsetUI() {
+  const row = $('dlm-offset-row');
+  if (!row) return;
+  // 桌面模式没有「贴任务栏」的概念（桌面直接拖位置），整行隐藏
+  const taskbar = lyricMetricKey() === 'taskbar';
+  row.style.display = taskbar ? '' : 'none';
+  if (!taskbar) return;
+  const v = lyricTaskbarOffsetValue();
+  const slider = $('dlm-offset');
+  const label = $('dlm-offset-val');
+  if (slider && document.activeElement !== slider) slider.value = String(v);
+  if (label) label.textContent = (v > 0 ? '+' : '') + v + 'px';
 }
 // 背景透明度那一档已下线：只留「文字透明度」，底板用固定值（见 desktop-lyric.html）
 // ---------- 歌词颜色预设（已唱/未唱共用一份，右键可删，自定义取色自动入库） ----------

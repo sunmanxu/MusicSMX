@@ -11,7 +11,7 @@
 <div id="app">
 
   <header id="topbar">
-    <div class="logo">
+    <div class="logo" id="logo-home" title="打开 GitHub 项目主页">
       <div class="logo-icon">S</div>
       <span>MusicSMX</span>
     </div>
@@ -114,15 +114,8 @@
             <button type="button" data-mode="poster">海报模式</button>
           </div>
         </div>
-        <div class="setting-row" id="tp-poster-row">
-          <span class="setting-label">海报氛围强度</span>
-          <div class="tp-slider-row">
-            <input type="range" id="tp-poster-opacity" min="0" max="100" step="1" value="100">
-            <span class="setting-val" id="tp-poster-opacity-val">100%</span>
-          </div>
-        </div>
         <div class="setting-row" id="tp-ui-row">
-          <span class="setting-label">界面透明度</span>
+          <span class="setting-label">海报氛围度</span>
           <div class="tp-slider-row">
             <input type="range" id="tp-ui-opacity" min="0" max="100" step="1" value="28">
             <span class="setting-val" id="tp-ui-opacity-val">28%</span>
@@ -337,8 +330,12 @@
     <div class="now">
       <div id="cover"><span class="cover-fallback">♪</span></div>
       <div class="now-text">
-        <div id="now-title">未在播放</div>
-        <div id="now-artist">—</div>
+        <button id="now-title" class="now-link" title="点击跳转网页详情">未在播放</button>
+        <div class="now-sub">
+          <button id="now-artist" class="now-link" title="点击跳转歌手网页">—</button>
+          <span class="now-sep" id="now-sep" hidden>·</span>
+          <button id="now-album" class="now-link" title="点击跳转专辑网页">—</button>
+        </div>
       </div>
     </div>
 
@@ -528,6 +525,12 @@
   <div class="dlm-scale">
     <div class="dlm-scale-head"><span id="dlm-opacity-label">文字透明度 · 任务栏</span><span id="dlm-opacity-val">30%</span></div>
     <input type="range" id="dlm-opacity" min="10" max="100" step="5" value="30" title="只调文字本身的透明度，底板不受影响（下限 10%）">
+  </div>
+  <!-- 水平平移：任务栏歌词默认贴任务栏正中，但 Win11 居中图标/小组件会占住中间，
+       这条滑块让歌词整体往左/往右挪。仅任务栏模式有意义，桌面模式隐藏（桌面直接拖）。 -->
+  <div class="dlm-scale" id="dlm-offset-row">
+    <div class="dlm-scale-head"><span id="dlm-offset-label">水平平移 · 任务栏</span><span id="dlm-offset-val">0px</span></div>
+    <input type="range" id="dlm-offset" min="-600" max="600" step="10" value="0" title="任务栏歌词整体往左（负值）或往右（正值）平移，单位像素">
   </div>
   <div class="dlm-sep"></div>
   <!-- 颜色预设色块由 app.js 动态渲染（S.settings.lyricColorPresets，右键可删），

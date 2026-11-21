@@ -22,12 +22,20 @@
      以前那层 rgba(12,14,20,.55) 就是「一圈深色底」的来源。 */
   #box {
     position: relative; width: 100%; height: 100%;
-    -webkit-app-region: drag;
+    /* 不用 -webkit-app-region: drag（2026-11-21）：那种区域上所有鼠标事件都不进
+       页面，右键会被 Windows 拿去弹系统菜单（还原/移动/大小/...），自带的右键
+       菜单永远弹不出来。拖动改为渲染端 pointer 事件 + 主进程 setBounds 跟随，
+       行为与原生拖动一致，右键 / 双击 / 悬停工具条全部恢复正常。 */
+    -webkit-app-region: no-drag;
     display: flex; flex-direction: column;
     align-items: center; justify-content: center;
     padding: 8px 46px;
     border-radius: 8px;
+    cursor: default;
   }
+  /* 可拖动的暗示：文字区抓手，按钮仍是手型 */
+  #line { cursor: grab; }
+  #line:active { cursor: grabbing; }
   /* 背景只有「透明 / 磨砂 / 深色」三档，各自用固定透明度 ——
      不再单独暴露「背景透明度」滑块，那个滑块已经换成「文字透明度」。 */
   body[data-bg="soft"] #box { background: rgba(18, 20, 28, 0.52); }
@@ -517,6 +525,36 @@
     e.preventDefault();
     if (mb && typeof mb.lyricContextMenu === 'function') mb.lyricContextMenu();
   });
+  // ---------- 手动拖动（替代 -webkit-app-region: drag） ----------
+  // 左键按住 #line（或空白处）拖动：pointer capture 保证拖出窗口边缘事件不断流
+  // （原生 app-region 拖动是系统级鼠标捕获，这里用 setPointerCapture 等效替代）。
+  // 右键不拦（交给上面的 contextmenu），工具条按钮不拖。
+  let dragActive = false;
+  box.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return;
+    if (e.target && e.target.closest && e.target.closest('.tbtn')) return;
+    dragActive = true;
+    try { box.setPointerCapture(e.pointerId); } catch (err) { /* 老窗口可能已释放 */ }
+    if (mb && typeof mb.lyricDrag === 'function') {
+      mb.lyricDrag({ event: 'start', screenX: e.screenX, screenY: e.screenY });
+    }
+    // 不 preventDefault：会拦掉兼容鼠标事件，连累桌面模式的双击切任务栏；
+    // 文本选中/原生拖拽已由全局 user-select:none 兜住。
+  });
+  box.addEventListener('pointermove', (e) => {
+    if (!dragActive) return;
+    if (mb && typeof mb.lyricDrag === 'function') {
+      mb.lyricDrag({ event: 'move', screenX: e.screenX, screenY: e.screenY });
+    }
+  });
+  const endDrag = (e) => {
+    if (!dragActive) return;
+    dragActive = false;
+    try { box.releasePointerCapture(e.pointerId); } catch (err) { /* 已经释放 */ }
+    if (mb && typeof mb.lyricDrag === 'function') mb.lyricDrag({ event: 'end' });
+  };
+  box.addEventListener('pointerup', endDrag);
+  box.addEventListener('pointercancel', endDrag);
   // 双击：桌面模式 → 任务栏（顺手做，不占菜单位置）
   box.addEventListener('dblclick', () => {
     if (mode === 'desktop') act('taskbar');
