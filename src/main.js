@@ -526,14 +526,38 @@ function lyricBounds(mode, display) {
 function applyLyricBounds(display) {
   if (!lyricWin || lyricWin.isDestroyed() || lyricMode === 'off') return;
   lyricProgrammaticMove++;
-  const nb = lyricBounds(lyricMode, display);
-  // 记下目标值：稍后到达的 resize 事件若与它一致，是我们自己 setBounds 的回声，
-  // 别当成「系统改了窗口」去触发重摆（否则每次换歌词宽度都会白跑一轮防抖+闪一次）。
-  // 事件可能异步晚于 80ms 的 lyricProgrammaticMove 窗口，所以不能只靠那个计数器。
-  lyricLastSetBounds = { x: nb.x, y: nb.y, width: nb.width, height: nb.height };
-  lyricLastForeignResize = null; // 我们重新掌握了位置，旧的外部改动不再需要去重
-  lyricWin.setBounds(nb);
-  setTimeout(() => { lyricProgrammaticMove = Math.max(0, lyricProgrammaticMove - 1); }, 80);
+  try {
+    const nb = lyricBounds(lyricMode, display);
+    // Windows 给这个无边框窗口的高度请求加了一圈隐形 DWM 边框（2026-11-22 实测定案）：
+    // 请求 <70px 一律 +7（要 40 给 47、要 38.4 给 45.2），≥70 则精确；宽度不受影响。
+    // 这就是历次「任务栏歌词下半截伸出屏幕」的真正根源——窗口永远比任务栏厚 7px，
+    // 而 y 贴着任务栏顶，底部必然出屏 7px。之前的守卫心跳/防抖重摆/多级自检全都在
+    // 反复调用同一句注定被膨胀的 setBounds，等于原地打转（用户：改了好多次都没解决）。
+    // 现在改为自校准：先按目标摆一次，量出系统膨胀了多少，把差值从请求里扣掉再摆，
+    // 让最终实际高度精确等于目标。最多两轮，非线性系统下也能收敛到最优；
+    // 不同 DPI / 系统版本的边框厚度差异自动适配。
+    let req = { x: nb.x, y: nb.y, width: nb.width, height: nb.height };
+    lyricWin.setBounds(req);
+    let got = lyricWin.getBounds();
+    const dh1 = got.height - nb.height;
+    if (Math.abs(dh1) >= 1) {
+      req = { x: nb.x, y: nb.y, width: nb.width, height: Math.max(20, nb.height - dh1) };
+      lyricWin.setBounds(req);
+      got = lyricWin.getBounds();
+      const dh2 = got.height - nb.height;
+      if (Math.abs(dh2) >= 1) {
+        req = { x: nb.x, y: nb.y, width: nb.width, height: Math.max(20, nb.height - dh2) };
+        lyricWin.setBounds(req);
+      }
+    }
+    // 回声基准记「系统最终呈现的实际值」而不是我们发出去的请求值——
+    // 否则 resize 回调永远认为几何被外部改了，450ms 防抖会无限重跑。
+    const fin = lyricWin.getBounds();
+    lyricLastSetBounds = { x: fin.x, y: fin.y, width: fin.width, height: fin.height };
+    lyricLastForeignResize = null; // 我们重新掌握了位置，旧的外部改动不再需要去重
+  } finally {
+    setTimeout(() => { lyricProgrammaticMove = Math.max(0, lyricProgrammaticMove - 1); }, 80);
+  }
 }
 
 // ---------- 几何守卫心跳 ----------
@@ -666,6 +690,8 @@ function ensureLyricWindow(mode) {
   lyricWin.loadFile(path.join(__dirname, 'renderer', 'desktop-lyric.html'));
   lyricWin.once('ready-to-show', () => {
     if (!lyricWin || lyricWin.isDestroyed()) return;
+    // 构造参数同样会被 Windows 膨胀 +7px，先自校准摆正再露脸
+    applyLyricBounds();
     lyricWin.showInactive();
     lyricDisplayId = currentLyricDisplay().id;
     lyricWin.webContents.send('lyric-mode', mode);

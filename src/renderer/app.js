@@ -1404,6 +1404,7 @@ function renderList() {
     virtualState = null;
     wrap.classList.remove('virtual');
     wrap.textContent = '';
+    updateTrackScrollbar();
     return;
   }
 
@@ -1417,6 +1418,7 @@ function renderList() {
       frag.appendChild(createTrackRow(t, i, cur));
     });
     wrap.appendChild(frag);
+    updateTrackScrollbar();
     return;
   }
 
@@ -1430,6 +1432,7 @@ function renderList() {
   wrap.appendChild(spacer);
   virtualState = { wrap, view: S.view, n, cur, rows: new Map() };
   renderVirtualWindow();
+  updateTrackScrollbar();
 }
 
 // 渲染当前可视窗口内的行（含上下缓冲行）
@@ -1558,12 +1561,102 @@ $('locate-current-float').addEventListener('click', locateCurrentTrack);
 // 滚动节流：用 rAF 合并高频 scroll 事件
 $('track-list').addEventListener('scroll', () => {
   updateBackToTop();
+  updateTrackScrollbar();
   if (!virtualState || virtualScrollRaf) return;
   virtualScrollRaf = requestAnimationFrame(() => {
     virtualScrollRaf = 0;
     renderVirtualWindow();
   });
 }, { passive: true });
+
+// ---------- 主列表自绘滚动条（2026-11-22 用户要求「更长、更透明」） ----------
+// 虚拟列表 scrollHeight 数万 px，原生 thumb 只剩几像素，CSS 无法拉长 →
+// 隐藏原生（CSS #track-list::-webkit-scrollbar width:0），这里画一个 fixed
+// overlay：thumb 保底 72px、颜色更透明；支持拖拽、轨道点击跳转、滚轮转发。
+const trackSb = document.createElement('div');
+trackSb.id = 'track-scrollbar';
+const trackSbThumb = document.createElement('div');
+trackSbThumb.className = 'tsb-thumb';
+trackSb.appendChild(trackSbThumb);
+document.body.appendChild(trackSb);
+let trackSbDrag = null; // { dy, prevBehavior }
+
+function trackSbHidden() {
+  const list = $('track-list');
+  // offsetParent 为 null = 容器自身或祖先 display:none（电台视图等）
+  return !list || !list.offsetParent || list.scrollHeight <= list.clientHeight + 1;
+}
+
+function updateTrackScrollbar() {
+  const list = $('track-list');
+  if (!list) return;
+  if (trackSbHidden()) {
+    if (trackSb.style.display !== 'none') trackSb.style.display = 'none';
+    return;
+  }
+  const r = list.getBoundingClientRect();
+  trackSb.style.display = 'block';
+  trackSb.style.left = Math.round(r.right - 9) + 'px';
+  trackSb.style.top = Math.round(r.top) + 'px';
+  trackSb.style.height = Math.round(r.height) + 'px';
+  // thumb 长度 = 视口占比 × 轨道，保底 72px（这就是「更长」的来源）
+  const thumbH = Math.max(72, Math.min(r.height, Math.round((list.clientHeight / list.scrollHeight) * r.height)));
+  const maxScroll = list.scrollHeight - list.clientHeight;
+  const progress = maxScroll > 0 ? list.scrollTop / maxScroll : 0;
+  trackSbThumb.style.height = thumbH + 'px';
+  trackSbThumb.style.top = Math.round(progress * (r.height - thumbH)) + 'px';
+}
+
+function trackSbApplyThumb(topPx) {
+  const list = $('track-list');
+  const h = trackSb.getBoundingClientRect().height;
+  const thumbH = trackSbThumb.offsetHeight;
+  const maxTop = Math.max(1, h - thumbH);
+  const clamped = Math.max(0, Math.min(maxTop, topPx));
+  trackSbThumb.style.top = clamped + 'px';
+  const maxScroll = list.scrollHeight - list.clientHeight;
+  // thumb 被保底拉长后端点仍精确：进度线性映射到滚动范围
+  if (maxScroll > 0) list.scrollTop = (clamped / maxTop) * maxScroll;
+}
+
+trackSb.addEventListener('pointerdown', (e) => {
+  const list = $('track-list');
+  if (!list || trackSbHidden()) return;
+  e.preventDefault();
+  const r = trackSb.getBoundingClientRect();
+  const thumbH = trackSbThumb.offsetHeight;
+  const thumbTop = parseFloat(trackSbThumb.style.top) || 0;
+  const inThumb = e.clientY >= r.top + thumbTop && e.clientY <= r.top + thumbTop + thumbH;
+  // 点在 thumb 上：从当前位置拖；点在轨道上：thumb 中心对准点击处并继续拖
+  trackSbDrag = { dy: inThumb ? (e.clientY - r.top - thumbTop) : thumbH / 2, prevBehavior: list.style.scrollBehavior };
+  if (!inThumb) trackSbApplyThumb(e.clientY - r.top - thumbH / 2);
+  trackSb.classList.add('dragging');
+  trackSb.setPointerCapture(e.pointerId);
+  // 拖拽期间禁用 CSS smooth，避免每次 scrollTop 赋值都变成动画
+  list.style.scrollBehavior = 'auto';
+});
+trackSb.addEventListener('pointermove', (e) => {
+  if (!trackSbDrag) return;
+  trackSbApplyThumb(e.clientY - trackSb.getBoundingClientRect().top - trackSbDrag.dy);
+});
+function trackSbEndDrag(e) {
+  if (!trackSbDrag) return;
+  const list = $('track-list');
+  list.style.scrollBehavior = trackSbDrag.prevBehavior || '';
+  trackSbDrag = null;
+  trackSb.classList.remove('dragging');
+  try { trackSb.releasePointerCapture(e.pointerId); } catch (_) { /* 已释放 */ }
+}
+trackSb.addEventListener('pointerup', trackSbEndDrag);
+trackSb.addEventListener('pointercancel', trackSbEndDrag);
+// 鼠标停在滚动条上时滚轮也能滚列表（原生滚动条才有这个行为）
+trackSb.addEventListener('wheel', (e) => {
+  const list = $('track-list');
+  if (!list) return;
+  e.preventDefault();
+  list.scrollTop += e.deltaY;
+}, { passive: false });
+window.addEventListener('resize', updateTrackScrollbar);
 
 // 创建单行元素（抽离出来，同步和分批渲染共用）
 // 网络歌曲行（灰色、不可播放）：右键弹菜单跳 QQ/网易云试听或复制歌名
@@ -2081,6 +2174,7 @@ function switchView(view) {
     $('music-library-section').style.display = 'none';
     hideScanStatus(); // 切换到电台时隐藏扫描进度
     updateFloatButtons(); // 电台视图下两个悬浮按钮都隐藏
+    updateTrackScrollbar(); // 列表已隐藏，收掉自绘滚动条
     renderRadioList();
     // 第一次真正打开电台页才静默检测各台可播状态（不打开就不发请求、不加载 hls.js）
     if (!radioAutoChecked) {
@@ -2986,14 +3080,17 @@ function renderFolders() {
   ul.textContent = '';
   const all = document.createElement('li');
   all.className = 'folder-item' + (S.activeFolder === null ? ' active' : '');
-  all.innerHTML = '<span class="fname">全部音乐</span><span class="fcount">' + S.tracks.length + '</span>';
-  // 刷新按钮
+  all.innerHTML = '<span class="fname">全部音乐</span>';
+  // 刷新按钮（2026-11-22 用户要求：放在计数左边，即 刷新 → 数字）
   const refreshAll = document.createElement('button');
   refreshAll.className = 'frefresh';
   refreshAll.title = '刷新全部音乐';
   refreshAll.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none"><path d="M23 4v6h-6M1 20v-6h6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
   refreshAll.addEventListener('click', (e) => { e.stopPropagation(); refreshAllFolders(); });
-  all.append(refreshAll);
+  const allCnt = document.createElement('span');
+  allCnt.className = 'fcount';
+  allCnt.textContent = S.tracks.length;
+  all.append(refreshAll, allCnt);
   all.addEventListener('click', () => {
     pushNav();
     S.activeFolder = null;
@@ -3023,12 +3120,7 @@ function renderFolders() {
     refresh.title = '刷新此文件夹';
     refresh.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none"><path d="M23 4v6h-6M1 20v-6h6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
     refresh.addEventListener('click', (e) => { e.stopPropagation(); refreshSingleFolder(root); });
-    const del = document.createElement('button');
-    del.className = 'fdel';
-    del.textContent = '×';
-    del.title = '移除该文件夹';
-    del.addEventListener('click', (e) => { e.stopPropagation(); removeFolder(root); });
-    li.append(name, cnt, refresh, del);
+    li.append(name, refresh, cnt);
     li.addEventListener('click', () => {
       pushNav();
       S.activeFolder = root;
@@ -3039,6 +3131,13 @@ function renderFolders() {
       renderSidebar();
       renderFolders();
       renderList();
+    });
+    // 右键 = 移除该文件夹（2026-11-22 用户反馈：× 按钮改为右键菜单入口）
+    li.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      closeAllFloatMenus();
+      showFolderCtxMenu(e.clientX, e.clientY, root);
     });
     ul.appendChild(li);
   }
@@ -3433,10 +3532,12 @@ function renderRecycleBin() {
   sorted.forEach(item => {
     const li = document.createElement('li');
     li.className = 'recycle-item';
-    li.title = item.path;
+    li.title = '单击播放 | ' + item.path;
     const date = new Date(item.deletedAt);
     const dateStr = (date.getMonth() + 1) + '/' + date.getDate() + ' ' + String(date.getHours()).padStart(2, '0') + ':' + String(date.getMinutes()).padStart(2, '0');
     li.innerHTML = '<span class="recycle-title">' + (item.title || '未知') + '</span><span class="recycle-date">' + dateStr + '</span>';
+    // 单击 = 播放（2026-11-22 用户要求回收站支持播放）
+    li.addEventListener('click', () => { playRecycleItem(item); });
     // 右键菜单
     li.addEventListener('contextmenu', (e) => {
       e.preventDefault();
@@ -3468,6 +3569,39 @@ function renderRecycleBin() {
 
 // 回收站右键菜单当前项目
 let ctxRecycleItem = null;
+
+// 回收站条目播放（2026-11-22 用户要求支持播放）：
+// 所有播放机制（歌词/封面/媒体键/上一首下一首/队列）都建立在 S.tracks 之上，
+// 曲库外裸播会破坏这些不变量，所以：已在曲库 → 曲库内播；不在曲库 → 重扫该文件
+// 恢复到曲库顶部再播。回收站记录保留不清（恢复流程会提示"已在列表"并顺手清掉，
+// 或 7 天自动清理）。文件已被删掉的才拒绝。
+async function playRecycleItem(item) {
+  try {
+    if (window.mb && window.mb.fileExists) {
+      const exists = await window.mb.fileExists(item.path);
+      if (!exists) { toast('文件已不存在，无法播放'); return; }
+    }
+  } catch (e) {}
+  const libIdx = S.tracks.findIndex(t => t.path.toLowerCase() === item.path.toLowerCase());
+  if (libIdx >= 0) { playAt(libIdx); return; }
+  try {
+    const folder = item.path.replace(/[\\/][^\\/]+$/, '');
+    const tracks = await mb.scan([folder], false);
+    const found = tracks.find(t => t.path.toLowerCase() === item.path.toLowerCase());
+    if (!found) { toast('未找到该歌曲文件，无法播放'); return; }
+    found.addedTime = Date.now();
+    S.tracks.unshift(found);
+    if (S.folders.has(folder)) S.folders.set(folder, S.folders.get(folder) + 1);
+    else S.folders.set(folder, 1);
+    renderFolders();
+    renderList();
+    saveConfig();
+    playAt(0);
+    toast('已回到曲库并播放：' + (found.title || item.title || ''));
+  } catch (e) {
+    toast('播放失败：' + (e && e.message || e));
+  }
+}
 
 // 点击外部关闭回收站右键菜单
 document.addEventListener('click', (e) => {
@@ -5719,6 +5853,7 @@ function openPlayerFull() {
   $('pf-spacing-single-val').textContent = pf.spacingSingle.toFixed(1);
   $('pf-spacing-double').value = pf.spacingDouble;
   $('pf-spacing-double-val').textContent = pf.spacingDouble.toFixed(1);
+  pfVsliderFillSync();
   // 立即更新所有内容（封面、歌曲信息、歌词、进度、时长）
   updatePlayerFull();
   // 逐字填充的 rAF 循环（只在全屏页开着时跑）
@@ -6604,6 +6739,17 @@ $('pf-playlist').addEventListener('click', (e) => {
 
 // 歌词间距滑块
 let pfSpacingTimer = null;
+// 竖滑条自绘填充：appearance:none 后没有原生 accent 填充，把当前值百分比写进
+// --fill 变量，CSS 轨道用它画「已过段橙色 / 未到段灰色」渐变
+function pfVsliderFillSync() {
+  for (const id of ['pf-spacing-single', 'pf-spacing-double']) {
+    const el = $(id);
+    if (!el) continue;
+    const span = parseFloat(el.max) - parseFloat(el.min);
+    const pct = span > 0 ? ((parseFloat(el.value) - parseFloat(el.min)) / span) * 100 : 0;
+    el.style.setProperty('--fill', pct.toFixed(1) + '%');
+  }
+}
 function applySpacing() {
   // 同样按实际列数取值：歌没有翻译时，只有「单」这一档有意义
   applyLyricSpacing(pfVisibleModes().length);
@@ -6617,12 +6763,14 @@ function applySpacing() {
 $('pf-spacing-single').addEventListener('input', (e) => {
   pf.spacingSingle = parseFloat(e.target.value);
   $('pf-spacing-single-val').textContent = pf.spacingSingle.toFixed(1);
+  pfVsliderFillSync();
   applySpacing();
   saveConfig();
 });
 $('pf-spacing-double').addEventListener('input', (e) => {
   pf.spacingDouble = parseFloat(e.target.value);
   $('pf-spacing-double-val').textContent = pf.spacingDouble.toFixed(1);
+  pfVsliderFillSync();
   applySpacing();
   saveConfig();
 });
@@ -8303,6 +8451,40 @@ document.addEventListener('click', (e) => {
   if (!e.target.closest('#placeholder-ctx-menu')) {
     $('placeholder-ctx-menu').hidden = true;
   }
+  if (!e.target.closest('#folder-ctx-menu')) {
+    $('folder-ctx-menu').hidden = true;
+  }
+});
+
+// ---------- 资料库文件夹右键菜单（移除该文件夹） ----------
+let folderCtxRoot = null;
+function showFolderCtxMenu(x, y, root) {
+  folderCtxRoot = root;
+  const menu = $('folder-ctx-menu');
+  menu.hidden = false;
+  menu.style.visibility = 'hidden';
+  menu.style.left = '0px';
+  menu.style.top = '0px';
+  const mw = menu.offsetWidth || 150;
+  const mh = menu.offsetHeight || 40;
+  let mx = x, my = y;
+  if (mx + mw > window.innerWidth) mx = window.innerWidth - mw - 5;
+  if (my + mh > window.innerHeight) my = Math.max(5, y - mh);
+  menu.style.left = mx + 'px';
+  menu.style.top = my + 'px';
+  menu.style.visibility = 'visible';
+}
+document.querySelectorAll('#folder-ctx-menu .ctx-item').forEach(item => {
+  item.addEventListener('click', async () => {
+    $('folder-ctx-menu').hidden = true;
+    if (item.dataset.action !== 'folder-remove' || !folderCtxRoot) return;
+    const root = folderCtxRoot;
+    folderCtxRoot = null;
+    const name = root.split(/[\\/]/).pop() || root;
+    const ok = await showConfirm('移除文件夹',
+      `确定从曲库移除「${name}」吗？文件夹里的音频文件不会被删除，只是不再纳入曲库扫描。`);
+    if (ok) removeFolder(root);
+  });
 });
 
 // ---------- 占位统计右键菜单（左侧「X 首缺失（占位）」） ----------
@@ -12478,7 +12660,7 @@ syncLyricStyleUI();
 // 点击，浮层就"点别处不缩回"；捕获监听先于一切 stopPropagation 执行，无死角。
 const POPOVER_IDS = ['theme-popover', 'desktop-lyric-menu', 'settings-modal', 'batch-menu', 'sort-menu'];
 // 右键菜单家族（fixed 定位、z-index 2600 统一层级，见 style.css）
-const RIGHT_MENU_IDS = ['context-menu', 'batch-context-menu', 'placeholder-ctx-menu', 'album-online-menu', 'radio-context-menu', 'recycle-context-menu', 'online-track-menu'];
+const RIGHT_MENU_IDS = ['context-menu', 'batch-context-menu', 'placeholder-ctx-menu', 'album-online-menu', 'radio-context-menu', 'recycle-context-menu', 'online-track-menu', 'folder-ctx-menu'];
 // 互斥总闸：收起所有浮层 + 右键菜单 + 动态歌单二级菜单。
 // 任何"打开新浮层/新菜单"的入口都先调它，杜绝两类历史 bug：
 // ① 右键菜单叠在外观/设置浮层上（右键是 contextmenu 事件，不触发左键捕获关闭）；
