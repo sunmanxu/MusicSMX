@@ -714,9 +714,17 @@ function ensureLyricWindow(mode) {
   lyricWin.on('moved', () => {
     if (lyricProgrammaticMove > 0) return;
     if (!lyricWin || lyricWin.isDestroyed()) return;
+    const nb0 = lyricWin.getBounds();
+    // 迟到的程序回声：位置与期望几何一致就不是用户拖的（否则宽度变化时
+    // 自动居中位置会被误存成手动位置，之后的重摆全被锁死在旧坐标上）。
+    const exp0 = lyricBounds(lyricMode, currentLyricDisplay());
+    if (Math.abs(nb0.x - exp0.x) <= 1 && Math.abs(nb0.y - exp0.y) <= 1 &&
+        Math.abs(nb0.width - exp0.width) <= 1 && Math.abs(nb0.height - exp0.height) <= 1) {
+      return;
+    }
     // 外部移动（用户拖动 / 系统挪动）刚发生：守卫心跳让路，避免打断拖拽循环
     lyricLastForeignMoveAt = Date.now();
-    const nb = lyricWin.getBounds();
+    const nb = nb0;
     if (lyricMode === 'taskbar') {
       lyricTaskbarX = nb.x;
       lyricTaskbarCenter = nb.x + nb.width / 2;
@@ -750,15 +758,56 @@ function ensureLyricWindow(mode) {
   // 这里把「非我们自己 setBounds 引起的 resize」也纳入同一个 450ms 防抖重摆流程，
   // 几何稳定后按当前显示器重新夹一次。自己摆的（回声 = 与 lyricLastSetBounds 一致）
   // 直接忽略，否则每次换歌词宽度都会白白隐身闪一轮。
+  //
+  // 2026-11-24 二次修复（用户在另一台电脑上实测：切行时歌词整段消失 0.3~0.4s）：
+  // 换行 → 宽度变化 → applyLyricBounds 的 setBounds 是异步落地的，resize 事件
+  // 读到的实际值与 applyLyricBounds 里同步 getBounds() 记下的 lyricLastSetBounds
+  // 差 1~2px（DPI 取整 / 系统应用时机）→ echo 判定失败 → 被当成「外部改动」→
+  // handleLyricDisplayChange() setOpacity(0) 隐身 450ms —— 正是切行闪现的根源。
+  // 慢机器上事件落得更晚（超出 programmaticMove 的 80ms 窗口），所以更容易复现。
+  // 三道闸：① programmaticMove 期间的 resize 一律视为自己的回声；
+  // ② 仍可疑时核对「期望几何」：窗口明明就摆在程序要摆的位置 → 不可能需要切屏流程；
+  // ③ 150ms 复核：回声自愈期内不触发隐身。
+  let lyricForeignResizeTimer = null;
   lyricWin.on('resize', () => {
     if (lyricMode === 'off') return;
     const b = lyricWin.getBounds();
     const same = (p, q) => p && Math.abs(p.x - q.x) <= 1 && Math.abs(p.y - q.y) <= 1 &&
       Math.abs(p.width - q.width) <= 1 && Math.abs(p.height - q.height) <= 1;
+    if (lyricProgrammaticMove > 0) {
+      // 自己 setBounds 的回声（可能晚于 80ms 窗口才到达）：把基线刷成实际值，
+      // 后续相同值靠 same() 去重；绝不走「外部改动」隐身流程。
+      lyricLastSetBounds = { x: b.x, y: b.y, width: b.width, height: b.height };
+      return;
+    }
     if (same(lyricLastSetBounds, b)) return;           // 我们自己 setBounds 的回声
+    // 与「当前显示器期望几何」一致 → 窗口就在程序要摆的位置上，没有外部改动。
+    // 切行造成的宽度/位置变化最终都会落到期望几何上，在这里被拦下（2026-11-24）。
+    const exp = lyricBounds(lyricMode, currentLyricDisplay());
+    if (Math.abs(b.x - exp.x) <= 1 && Math.abs(b.y - exp.y) <= 1 &&
+        Math.abs(b.width - exp.width) <= 1 && Math.abs(b.height - exp.height) <= 1) {
+      lyricLastSetBounds = { x: b.x, y: b.y, width: b.width, height: b.height };
+      return;
+    }
     if (same(lyricLastForeignResize, b)) return;       // 同一个外部改动只处理一次，防回弹循环
     lyricLastForeignResize = { x: b.x, y: b.y, width: b.width, height: b.height };
-    handleLyricDisplayChange();
+    // 150ms 后复核还在才算真外部改动：setBounds 中间值/迟到的回声在这个窗口内自愈，
+    // 不再一杆子打进 450ms 隐身流程。真·切屏时系统会把窗口挪到错误位置且持续存在，
+    // 复核照样通过，行为不受影响。
+    clearTimeout(lyricForeignResizeTimer);
+    lyricForeignResizeTimer = setTimeout(() => {
+      lyricForeignResizeTimer = null;
+      if (!lyricWin || lyricWin.isDestroyed() || lyricMode === 'off') return;
+      if (lyricProgrammaticMove > 0) return;
+      const b2 = lyricWin.getBounds();
+      const exp2 = lyricBounds(lyricMode, currentLyricDisplay());
+      if (Math.abs(b2.x - exp2.x) <= 1 && Math.abs(b2.y - exp2.y) <= 1 &&
+          Math.abs(b2.width - exp2.width) <= 1 && Math.abs(b2.height - exp2.height) <= 1) {
+        lyricLastSetBounds = { x: b2.x, y: b2.y, width: b2.width, height: b2.height };
+        return;                                        // 自愈：最终落回了期望几何
+      }
+      handleLyricDisplayChange();
+    }, 150);
   });
 }
 
