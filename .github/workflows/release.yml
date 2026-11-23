@@ -5,6 +5,12 @@ name: Release
 #   2. git tag v1.2.1 && git push origin main --tags
 #   3. Actions 会打包 MusicSMX-1.2.1-setup.exe 并发布 Release（含 latest.yml）
 # 装好的客户端「检查更新」读的就是这个 Release。
+# 注意（2026-11-23 实测）：electron-builder 并行上传会把同一 tag 拆成两个 Draft
+# （setup.exe+latest.yml 一个、.blockmap 另一个）。构建完成后需手动处理：
+#   1. 在 Releases 页把缺失的资产补进其中一个 Draft、删掉多余 Draft
+#      （或用 API：下载 blockmap → POST 到主 Draft → DELETE 多余 Draft）
+#   2. 点 Draft 的 Publish 正式发布（草稿对未登录的 /releases/latest 不可见，
+#      不发布会「检查更新」查不到新版本）
 on:
   push:
     tags:
