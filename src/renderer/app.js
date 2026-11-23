@@ -7375,7 +7375,19 @@ function importQQMusicPlaylist(data, opts = {}) {
     for (const idx of list) {
       if (!ignoreUsed && usedIndices.has(idx)) continue;
       const localName = normalizeStr(S.tracks[idx].title);
-      if (localName && (localName === nameKey || localName.includes(nameKey) || nameKey.includes(localName))) return idx;
+      if (!localName) continue;
+      if (localName === nameKey) return idx;
+      // 子串包含必须两边都有足够长度（2026-11-24 修复）：QQ 上有单字符歌名（如第 18 首
+      // 「E」），contains 判定会让它把任何含这个字母的标题都抢过去——实测 "E" 抢走
+      // "A Rusty Dream"，#18 错位、E 整条从歌单里消失。比例护栏再拦住「短名 × 长副标题」
+      // 的跨界误配（长串远超短串 3 倍+2 时不算同曲）。
+      if (localName.includes(nameKey) || nameKey.includes(localName)) {
+        const shorter = Math.min(localName.length, nameKey.length);
+        const longer = Math.max(localName.length, nameKey.length);
+        if (shorter < 2) continue;
+        if (longer > shorter * 3 + 2) continue;
+        return idx;
+      }
     }
     return -1;
   };
