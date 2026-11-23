@@ -3935,11 +3935,11 @@ body.is-fullscreen .pf-top { padding-top: 14px; }
   display: flex; justify-content: space-between; align-items: center;
   padding-top: 10px; border-top: 1px solid var(--border);
 }
-/* 版本角标：钉在界面左下角（窗口级 fixed，不随侧栏滚动），点击 = 检查更新 */
+/* 版本角标：钉在侧栏底部空区（回收站下方、播放栏上方），不随侧栏滚动，点击 = 检查更新 */
 #app-version {
   position: fixed;
-  left: 8px;
-  bottom: 2px;
+  left: 14px;
+  bottom: 78px;   /* 播放栏 72px + 6px 间距 */
   z-index: 5;
   font-size: 10px;
   line-height: 1;
