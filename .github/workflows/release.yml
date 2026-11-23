@@ -1,0 +1,32 @@
+name: Release
+
+# 推送 v 开头的 tag 时自动构建并发布到 GitHub Releases：
+#   1. 改 package.json 的 version（如 1.2.1）
+#   2. git tag v1.2.1 && git push origin main --tags
+#   3. Actions 会打包 MusicSMX-1.2.1-setup.exe 并发布 Release（含 latest.yml）
+# 装好的客户端「检查更新」读的就是这个 Release。
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build and publish
+        run: npx electron-builder --win --publish always
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

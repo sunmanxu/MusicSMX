@@ -207,6 +207,8 @@
         </div>
         <ul id="recycle-bin-list" class="recycle-bin-list" style="display: none;"></ul>
       </div>
+      <!-- 版本角标：侧栏最底部，启动时从主进程读 package.json 的 version -->
+      <div id="app-version" title="MusicSMX 版本号，点击检查更新"></div>
     </aside>
 
     <section id="content">
@@ -446,6 +448,7 @@
       </label>
     </div>
     <div class="settings-pop-foot">
+      <span id="settings-version-label" style="opacity:0.5; font-size:11px; margin-right:auto; align-self:center;"></span>
       <button class="btn ghost" id="btn-check-update">检查更新</button>
       <button class="btn" id="btn-save-settings">保存设置</button>
     </div>

@@ -3935,6 +3935,20 @@ body.is-fullscreen .pf-top { padding-top: 14px; }
   display: flex; justify-content: space-between; align-items: center;
   padding-top: 10px; border-top: 1px solid var(--border);
 }
+/* 版本角标：钉在界面左下角（窗口级 fixed，不随侧栏滚动），点击 = 检查更新 */
+#app-version {
+  position: fixed;
+  left: 8px;
+  bottom: 2px;
+  z-index: 5;
+  font-size: 10px;
+  line-height: 1;
+  color: var(--text-faint);
+  cursor: pointer;
+  user-select: none;
+  transition: color 0.15s;
+}
+#app-version:hover { color: var(--accent); }
 
 /* ===== 海报模式下的浮层毛玻璃（2026-11-20） =====
    海报底色默认开启后，右键菜单/弹窗/侧栏面板如果还是实心 --bg-elev，

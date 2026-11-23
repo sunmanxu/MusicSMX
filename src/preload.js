@@ -149,6 +149,10 @@ try {
     // 手动拖动（替代 -webkit-app-region: drag——那种区域上右键会弹 Windows 系统菜单）
     // st = { event: 'start'|'move'|'end', screenX, screenY }（渲染端光标屏幕坐标）
     lyricDrag: (st) => ipcRenderer.send('lyric-drag', st),
+    // 当前应用版本（package.json 的 version，随打包写入 exe）
+    getAppVersion: () => ipcRenderer.invoke('get-app-version'),
+    // 查 GitHub Releases 最新版并比较：{ok, current, latest, updateAvailable, downloadUrl, notes, error}
+    checkUpdate: () => ipcRenderer.invoke('check-update'),
     version: '1.0.6'
   };
 

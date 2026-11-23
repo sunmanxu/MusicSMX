@@ -1,5 +1,5 @@
 'use strict';
-const { app, BrowserWindow, ipcMain, dialog, Tray, Menu, nativeImage, shell, screen, globalShortcut } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, Tray, Menu, nativeImage, shell, screen, globalShortcut, net } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
@@ -2108,6 +2108,59 @@ ipcMain.handle('open-external', async (e, url) => {
     return { ok: true };
   } catch (err) {
     return { ok: false, error: err.message || String(err) };
+  }
+});
+
+// ---------- 版本号与更新检查 ----------
+ipcMain.handle('get-app-version', () => app.getVersion());
+
+// 语义化版本比较：1.2.10 > 1.2.9；忽略 v 前缀
+function cmpVer(a, b) {
+  const pa = String(a).replace(/^v/i, '').split('.').map(n => parseInt(n, 10) || 0);
+  const pb = String(b).replace(/^v/i, '').split('.').map(n => parseInt(n, 10) || 0);
+  for (let i = 0; i < 3; i++) {
+    if ((pa[i] || 0) !== (pb[i] || 0)) return (pa[i] || 0) > (pb[i] || 0) ? 1 : -1;
+  }
+  return 0;
+}
+
+// 查 GitHub Releases 最新版：仓库里推的是源码，安装包只存在于 Release 的 assets 里。
+// 源码推送本身不会产生安装包——发布走 GitHub Actions（见 .github/workflows/release.yml）
+// 或手动上传 setup.exe 到 Release。
+ipcMain.handle('check-update', async () => {
+  const current = app.getVersion();
+  const result = { ok: false, current, latest: null, updateAvailable: false, htmlUrl: null, downloadUrl: null, notes: '', error: null };
+  const fetchUrl = (url) => new Promise((resolve, reject) => {
+    const req = net.request(url);
+    req.setHeader('User-Agent', 'MusicSMX-Updater');
+    req.setHeader('Accept', 'application/vnd.github+json');
+    req.on('response', (res) => {
+      let d = '';
+      res.on('data', (c) => { d += c; });
+      res.on('end', () => resolve({ status: res.statusCode, body: d }));
+    });
+    req.on('error', (err) => reject(err));
+    req.end();
+  });
+  try {
+    const r = await fetchUrl('https://api.github.com/repos/sunmanxu/MusicSMX/releases/latest');
+    if (r.status === 404) { result.error = '仓库还没有发布过 Release'; return result; }
+    if (r.status !== 200) { result.error = 'GitHub 返回 ' + r.status; return result; }
+    const rel = JSON.parse(r.body);
+    const latest = String(rel.tag_name || '').replace(/^v/i, '');
+    result.ok = true;
+    result.latest = latest;
+    result.updateAvailable = cmpVer(latest, current) > 0;
+    result.htmlUrl = rel.html_url || null;
+    result.notes = rel.body || '';
+    // 优先找 setup.exe 安装包资产，找不到就退回 Release 页面
+    const assets = rel.assets || [];
+    const setup = assets.find(a => /setup\.exe$/i.test(a.name)) || assets.find(a => /\.exe$/i.test(a.name));
+    result.downloadUrl = setup ? setup.browser_download_url : result.htmlUrl;
+    return result;
+  } catch (err) {
+    result.error = err.message || String(err);
+    return result;
   }
 });
 

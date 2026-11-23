@@ -8135,10 +8135,74 @@ $('btn-save-settings').addEventListener('click', () => {
   saveConfig();
 });
 
-// 检查更新：占位入口，功能后续接入
+// ---------- 版本号与检查更新 ----------
+// 版本号两处显示：侧栏底部角标 + 设置面板左下角。数据统一来自主进程
+// app.getVersion()（打包后 = package.json 的 version）。
+// 检查更新：查 GitHub Releases 最新版；有更新时按钮变「去下载」，点它开浏览器下载 setup.exe。
+let lastUpdateResult = null;
+
+async function runUpdateCheck() {
+  const btn = $('btn-check-update');
+  if (btn.dataset.busy === '1') return;
+  btn.dataset.busy = '1';
+  const origText = btn.textContent;
+  btn.textContent = '检查中…';
+  let res;
+  try {
+    res = await mb.checkUpdate();
+  } catch (e) {
+    res = { ok: false, error: e && e.message || String(e) };
+  }
+  btn.dataset.busy = '';
+  btn.textContent = origText;
+  if (!res.ok) {
+    toast('检查更新失败：' + (res.error || '网络错误'));
+    return;
+  }
+  lastUpdateResult = res;
+  if (res.updateAvailable) {
+    toast('发现新版本 v' + res.latest + '（当前 v' + res.current + '）');
+    // 两个入口都切成「去下载」：设置按钮 + 侧栏角标
+    btn.textContent = '去下载 v' + res.latest;
+    btn.dataset.download = '1';
+    const v = $('app-version');
+    if (v) v.textContent = 'v' + res.current + ' · 有新版本';
+    if ($('settings-version-label')) $('settings-version-label').textContent = 'v' + res.current + ' · 有新版本 v' + res.latest;
+  } else {
+    toast('已是最新版本 v' + res.current);
+  }
+}
+
+function openUpdateDownload() {
+  if (!lastUpdateResult || !lastUpdateResult.updateAvailable) {
+    runUpdateCheck();
+    return;
+  }
+  mb.openExternal(lastUpdateResult.downloadUrl || lastUpdateResult.htmlUrl || 'https://github.com/sunmanxu/MusicSMX/releases');
+}
+
+// 设置面板的检查更新按钮：第一次点=检查，有更新后变成「去下载」直接开浏览器
 $('btn-check-update').addEventListener('click', () => {
-  toast('检查更新功能即将上线，敬请期待');
+  if ($('btn-check-update').dataset.download === '1') {
+    openUpdateDownload();
+  } else {
+    runUpdateCheck();
+  }
 });
+
+// 侧栏底部版本角标：点击 = 有更新就下载，否则检查
+$('app-version').addEventListener('click', openUpdateDownload);
+
+// 启动时填版本号（侧栏 + 设置面板），加载失败静默留空
+(async () => {
+  try {
+    const ver = await mb.getAppVersion();
+    const text = 'v' + ver;
+    const corner = $('app-version');
+    if (corner) corner.textContent = text;
+    if ($('settings-version-label')) $('settings-version-label').textContent = text;
+  } catch (e) { /* 无版本信息就不显示 */ }
+})();
 
 // ---------- 歌词面板 ----------
 // 统一打开入口：先收起播放列表抽屉（同一角落只留一个浮层），再按需刷新内容。
