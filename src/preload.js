@@ -130,6 +130,10 @@ try {
     onLyricScale: (cb) => {
       ipcRenderer.on('lyric-scale', (_e, v) => cb(v));
     },
+    // 任务栏条真实高度 + 内容锚点（主进程把窗口抬到 72px 地板后，条高 ≠ 窗口高）
+    onLyricGeom: (cb) => {
+      ipcRenderer.on('lyric-geom', (_e, g) => cb(g || {}));
+    },
     onLyricState: (cb) => {
       ipcRenderer.on('lyric-state', (_e, st) => cb(st));
     },

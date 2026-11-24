@@ -211,6 +211,9 @@
   let scale = 1;
   let locked = false;
   let data = null;
+  // 任务栏条真实几何（主进程 lyric-geom 推送）：窗口被抬到 72px 地板后
+  // viewport ≠ 条高，字号与内容位置必须按条高算，不能用 innerHeight
+  let geom = { h: 0, anchor: 'bottom' };
   // 切歌渐出渐入状态：lastTitle 判「换了歌」，pendingD 攒淡出期间到达的最新帧
   let lastTitle = null;
   let pendingD = null;
@@ -281,14 +284,16 @@
     applyFont();
   }
 
-  // 字号与内边距跟随缩放；任务栏模式窗口高度 = 任务栏厚度，字号必须夹住别溢出
+  // 字号与内边距跟随缩放；任务栏模式字号按「条的真实高度」夹住，内容锚定到条上
   function applyFont() {
     const desktopBase = 27, taskbarBase = 15;
     const dual = (style.layout || 'dual') !== 'single';
     let rowH;
     if (mode === 'taskbar') {
-      // 任务栏双行是两行挤在同一条 40px 里：单行可用高度要减半再分给两行
-      const boxH = Math.max(20, window.innerHeight - 4);
+      // 任务栏双行是两行挤在同一条（约 40px）里：单行可用高度要减半再分给两行。
+      // 条高用主进程推送的 geom.h（窗口被抬到 72px 地板后 innerHeight 是虚的）
+      const stripH = (geom.h > 0 && geom.h <= window.innerHeight) ? geom.h : window.innerHeight;
+      const boxH = Math.max(20, stripH - 4);
       const limit = dual ? Math.max(10, boxH / 2) : Math.max(11, boxH);
       const base = dual ? taskbarBase * 0.86 : taskbarBase;
       const fs = Math.min(base * scale, dual ? limit * 0.92 : limit);
@@ -298,6 +303,13 @@
       // 主次差异交给颜色和字重，别再靠字号。
       sub.style.fontSize = fs + 'px';
       rowH = dual ? Math.ceil(fs * 1.16) : Math.ceil(fs * 1.3);
+      // #box 精确覆盖条区域，地板多出的透明区不画任何东西（含磨砂/深色底）：
+      // 贴底任务栏 = 条贴窗口底边（主进程已保证），内容居中于条内
+      const padY = Math.max(0, Math.round(window.innerHeight - stripH));
+      const anchorTop = geom.anchor === 'top';
+      box.style.height = Math.max(28, Math.round(stripH)) + 'px';
+      box.style.marginTop = (anchorTop ? 0 : padY) + 'px';
+      box.style.marginBottom = (anchorTop ? padY : 0) + 'px';
       box.style.padding = '0 ' + Math.round(12 * Math.max(1, scale * 0.9)) + 'px';
     } else {
       const fs = desktopBase * scale;
@@ -305,6 +317,9 @@
       sub.style.fontSize = fs + 'px';
       rowH = Math.round(fs * 1.32);
       box.style.padding = Math.round(8 * scale) + 'px ' + Math.round(46 * scale) + 'px';
+      box.style.height = '';
+      box.style.marginTop = '';
+      box.style.marginBottom = '';
     }
     // 两行共用同一个槽高：换句时行盒高度不变，整块文字不会上下漂
     document.documentElement.style.setProperty('--row-h', rowH + 'px');
@@ -483,6 +498,14 @@
     if (typeof mb.onLyricMode === 'function') mb.onLyricMode(setMode);
     if (typeof mb.onLyricScale === 'function') {
       mb.onLyricScale((v) => { scale = Math.max(0.3, Math.min(1.8, Number(v) || 1)); applyFont(); });
+    }
+    if (typeof mb.onLyricGeom === 'function') {
+      mb.onLyricGeom((g) => {
+        const h = Math.round(Number(g.h));
+        if (isFinite(h) && h > 0) geom.h = h;
+        if (g.anchor === 'top' || g.anchor === 'bottom') geom.anchor = g.anchor;
+        applyFont();
+      });
     }
     if (typeof mb.onLyricStyle === 'function') {
       mb.onLyricStyle((st) => {

@@ -9734,7 +9734,8 @@ function pitchPump(e) {
   const n = e.inputBuffer.length;
   const interleaved = new Float32Array(n * 2);
   for (let i = 0; i < n; i++) { interleaved[i * 2] = inL[i]; interleaved[i * 2 + 1] = inR[i]; }
-  st._inputBuffer.putSamples(interleaved);
+  // putSamples 的 numFrames 只有传负数才会按数组长度推导，缺省 0 = 塞 0 帧（整条静音的根因）
+  st._inputBuffer.putSamples(interleaved, 0, n);
   st.process();
   const ob = st._outputBuffer;
   const outL = e.outputBuffer.getChannelData(0);
@@ -9781,6 +9782,9 @@ async function ensurePitchChain() {
   if (!pitchFx.st) {
     pitchFx.st = new window.SoundTouchJS.SoundTouch();
     applyPitchToSt();
+    // Stretch 内部按 44100 硬编码算序列/搜索窗长度；AudioContext 实际多为 48000，
+    // 不对齐的话 WSOLA 窗长全错（时间拉伸比例失真，跨设备还可能额外吞延迟）
+    try { pitchFx.st.stretch.setParameters(eq.ctx.sampleRate, 0, 0, 8); } catch (e) {}
     pitchFx.node = eq.ctx.createScriptProcessor(4096, 2, 2);
     pitchFx.node.onaudioprocess = pitchPump;
   }

@@ -409,6 +409,10 @@ let lyricGeomGuardTimer = null;   // 几何守卫心跳：2s 一次不变量巡�
 let lyricLastForeignMoveAt = 0;   // 最近一次外部移动/拖动的时间：拖动中暂停守卫，防止打断用户
 let lyricDisplayId = null;      // 歌词窗当前所在显示器；跨屏时清掉旧 DPI 下量出的宽度/锚点
 let lyricDisplayChangeTimer = null; // 切屏事件防抖：等显示器几何稳定后再重摆一次
+let lyricLastDisplayGeom = null; // 上次记录的歌词屏几何（宽/高/DPI）：同屏改分辨率（4K↔2K）时
+                                 // display id 不变，靠它识别「分辨率变了」并清旧量出的几何
+let lyricGeomLogBuf = [];       // 几何诊断日志缓冲：跨屏 bug 在另一台电脑上复现时靠它取证据
+let lyricGeomLogAt = 0;         // 缓冲首条入队时间：超过 3 秒强制落盘（低频事件不留证据）
 
 function clampLyricScale(v) {
   const n = Number(v);
@@ -431,6 +435,42 @@ function syncLyricMetricsForMode() {
   const k = lyricMetricKey();
   lyricScale = clampLyricScale(lyricScales[k]);
   lyricStyle.opacity = lyricOpacityFor(k);
+}
+
+// 几何诊断日志：只记「何时何地窗口被摆成什么样」，静默追加到 userData，
+// 用户再报「超出屏幕/位置乱」时取回这份文件就能还原完整时间线。
+// 缓冲批量写 + 200KB 上限（超限丢弃最旧一半），绝不阻塞几何流程。
+function lyricGeomLog(tag, detail) {
+  try {
+    const b = lyricWin && !lyricWin.isDestroyed() ? lyricWin.getBounds() : null;
+    const d = (lyricWin && !lyricWin.isDestroyed()) ? currentLyricDisplay() : null;
+    const line = `${new Date().toISOString()} [${tag}]` +
+      (b ? ` win=${Math.round(b.x)},${Math.round(b.y)} ${Math.round(b.width)}x${Math.round(b.height)}` : ' win=null') +
+      (d ? ` disp#${d.id} ${d.bounds.width}x${d.bounds.height}@${d.scaleFactor} wa=${d.workArea.width}x${d.workArea.height}+${d.workArea.x}+${d.workArea.y}` : ' disp=null') +
+      (detail ? ` | ${detail}` : '');
+    lyricGeomLogBuf.push(line);
+    if (!lyricGeomLogAt) {
+      lyricGeomLogAt = Date.now();
+      // 真定时落盘：低频事件（如一次切屏只有 2 条记录）不能等下一条事件才落盘，
+      // 否则用户复现后直接关软件，缓冲里的证据就丢了
+      setTimeout(lyricGeomFlush, 3100);
+    }
+    if (lyricGeomLogBuf.length >= 20 || Date.now() - lyricGeomLogAt > 3000) lyricGeomFlush();
+  } catch (e) { /* 日志永不连累主流程 */ }
+}
+
+function lyricGeomFlush() {
+  if (!lyricGeomLogBuf.length) return;
+  lyricGeomLogAt = 0;
+  try {
+    const file = path.join(app.getPath('userData'), 'lyric-geom.log');
+    if (fs.existsSync(file) && fs.statSync(file).size > 200 * 1024) {
+      const old = fs.readFileSync(file, 'utf8').split('\n');
+      fs.writeFileSync(file, old.slice(Math.floor(old.length / 2)).join('\n'), 'utf8');
+    }
+    fs.appendFileSync(file, lyricGeomLogBuf.join('\n') + '\n', 'utf8');
+  } catch (e) { /* 同步盘锁住等场景：丢这批日志也不影响功能 */ }
+  lyricGeomLogBuf = [];
 }
 
 // 歌词窗当前所在显示器。2K/4K 双屏切换后，taskbar 厚度、workArea、
@@ -471,6 +511,12 @@ function taskbarRect(display) {
 function lyricBounds(mode, display) {
   const d = display || currentLyricDisplay();
   const wa = d.workArea;
+  // 无边框透明窗的 Windows 高度地板（2026-11-25 实测定案）：请求 <64px 一律被系统
+  // 抬到 64px，而 Chromium 簿记仍记请求值 → OS 窗口与渲染端 viewport 永久脱钩
+  // （宽度无地板）。历史上另一台机器表现为「请求 <70 一律 +7」——本质同源，
+  // 膨胀量随机器/DPI 变。对策：请求高度一律 ≥72（72 在两台机器上都精确落地），
+  // 多出来的高度留给透明区；同时把任务栏条的真实高度发渲染端排版（lyric-geom）。
+  const FLOOR_H = 72;
   if (mode === 'taskbar') {
     const tb = taskbarRect(d);
     // 任务栏在屏幕左/右侧（少见）：竖着排一小段
@@ -479,7 +525,6 @@ function lyricBounds(mode, display) {
       return { width: Math.max(28, Math.round(tb.w)), height: h,
                x: Math.round(tb.x), y: Math.round(tb.y + (tb.h - h) / 2) };
     }
-    const h = Math.max(28, Math.round(tb.h));
     // 宽度跟着文字实际长度走。以前是固定占任务栏一半宽（1920 屏上就是 960px），
     // 短歌词也横贯一大条，直接把中间那排任务栏图标压在下面 —— 这就是「遮挡任务栏按钮」。
     // 现在由渲染端实测文字宽度回报，窗口只包住文字本身。
@@ -508,11 +553,18 @@ function lyricBounds(mode, display) {
       lyricTaskbarCenter = x + w / 2;
       lyricTaskbarX = x;
     }
-    return { width: w, height: h, x, y: Math.round(tb.y) };
+    // 地板高度：条高不足 72 时抬到 72，窗口底边贴屏幕底边（贴顶任务栏则顶边贴顶），
+    // 条的真实区域贴着屏幕边——渲染端按 stripH/stripAnchor 把内容锚到条上。
+    const stripH = Math.max(28, Math.round(tb.h));
+    const h = Math.max(FLOOR_H, stripH);
+    const bnd = d.bounds;
+    const atTop = Math.abs(tb.y - bnd.y) <= Math.abs((bnd.y + bnd.height) - (tb.y + tb.h));
+    const y = atTop ? Math.round(tb.y) : Math.round(tb.y + tb.h - h);
+    return { width: w, height: h, x, y, stripH, stripAnchor: atTop ? 'top' : 'bottom' };
   }
   // 桌面模式：一块固定画布承载两行（双行原位交替，不需要更宽的滑道）
   const w = Math.round(760 * lyricScale);
-  const h = Math.round(128 * lyricScale);
+  const h = Math.max(FLOOR_H, Math.round(128 * lyricScale));
   // 桌面模式也记住用户拖到的位置，缩放时保持左上角不动
   let x = lyricDesktopPos ? lyricDesktopPos.x : Math.round(wa.x + (wa.width - w) / 2);
   let y = lyricDesktopPos ? lyricDesktopPos.y : Math.round(wa.y + wa.height - h - 96);
@@ -537,6 +589,15 @@ function applyLyricBounds(display) {
     // 让最终实际高度精确等于目标。最多两轮，非线性系统下也能收敛到最优；
     // 不同 DPI / 系统版本的边框厚度差异自动适配。
     let req = { x: nb.x, y: nb.y, width: nb.width, height: nb.height };
+    // 任务栏条的真实高度/锚点先发给渲染端：窗口高度现在抬到了 72px 地板之上，
+    // 渲染端 viewport 比条高，字号与内容锚定必须按条高算，不能用 innerHeight
+    //（发两遍：setBounds 前后各一次，保证 resize 回调触发 applyFont 时已收到）
+    if (nb.stripH) {
+      const geomMsg = { h: nb.stripH, anchor: nb.stripAnchor || 'bottom' };
+      try {
+        lyricWin.webContents.send('lyric-geom', geomMsg);
+      } catch (e) { /* 窗口正在销毁 */ }
+    }
     lyricWin.setBounds(req);
     let got = lyricWin.getBounds();
     const dh1 = got.height - nb.height;
@@ -553,7 +614,39 @@ function applyLyricBounds(display) {
     // 回声基准记「系统最终呈现的实际值」而不是我们发出去的请求值——
     // 否则 resize 回调永远认为几何被外部改了，450ms 防抖会无限重跑。
     const fin = lyricWin.getBounds();
+    // 硬夹取兜底：自校准在切屏过渡期可能读到异步旧值而收敛到错误高度/位置
+    // （比如底部越出屏幕 7px 的老毛病）。校准后窗口任何一边超出目标显示器
+    // 就再摆一次，位置/尺寸按显示器 bounds 硬夹——这是绝对不变量，任何 DPI
+    // 组合下都不允许窗口裸露在屏幕外。
+    const db = (display || currentLyricDisplay()).bounds;
+    if (fin.width > 0 && fin.height > 0 &&
+        (fin.x < db.x - 1 || fin.y < db.y - 1 ||
+         fin.x + fin.width > db.x + db.width + 1 || fin.y + fin.height > db.y + db.height + 1)) {
+      const cx = Math.max(db.x, Math.min(fin.x, db.x + db.width - fin.width));
+      const cy = Math.max(db.y, Math.min(fin.y, db.y + db.height - fin.height));
+      const cw = Math.min(fin.width, db.width);
+      const ch = Math.max(20, Math.min(fin.height, db.height));
+      lyricWin.setBounds({ x: Math.round(cx), y: Math.round(cy), width: Math.round(cw), height: Math.round(ch) });
+      let fin2 = lyricWin.getBounds();
+      // 夹完仍越界 = DWM 膨胀把请求尺寸又撑大了（校准两轮都没吃掉）：按残余过冲
+      // 直接从请求里扣掉再摆一轮。此时已过过渡期，读数是稳的，一轮必收敛。
+      const overB = (fin2.y + fin2.height) - (db.y + db.height);
+      const overR = (fin2.x + fin2.width) - (db.x + db.width);
+      if (overB > 1 || overR > 1) {
+        lyricWin.setBounds({
+          x: Math.round(cx), y: Math.round(cy), width: Math.round(cw),
+          height: Math.max(20, Math.round(ch - Math.max(0, overB)))
+        });
+        fin2 = lyricWin.getBounds();
+      }
+      lyricGeomLog('clamp', `want=${Math.round(cx)},${Math.round(cy)} ${Math.round(cw)}x${Math.round(ch)} got=${fin2.x},${fin2.y} ${fin2.width}x${fin2.height}`);
+    }
     lyricLastSetBounds = { x: fin.x, y: fin.y, width: fin.width, height: fin.height };
+    if (nb.stripH) {
+      try {
+        lyricWin.webContents.send('lyric-geom', { h: nb.stripH, anchor: nb.stripAnchor || 'bottom' });
+      } catch (e) { /* 窗口正在销毁 */ }
+    }
     lyricLastForeignResize = null; // 我们重新掌握了位置，旧的外部改动不再需要去重
   } finally {
     setTimeout(() => { lyricProgrammaticMove = Math.max(0, lyricProgrammaticMove - 1); }, 80);
@@ -577,6 +670,7 @@ function lyricGeometryGuardTick() {
   const exp = lyricBounds(lyricMode, d);
   if (Math.abs(b.x - exp.x) > 1 || Math.abs(b.y - exp.y) > 1 ||
       Math.abs(b.width - exp.width) > 1 || Math.abs(b.height - exp.height) > 1) {
+    lyricGeomLog('guard-fix', `exp=${exp.x},${exp.y} ${exp.width}x${exp.height}`);
     applyLyricBounds(d);
   }
 }
@@ -791,6 +885,7 @@ function ensureLyricWindow(mode) {
     }
     if (same(lyricLastForeignResize, b)) return;       // 同一个外部改动只处理一次，防回弹循环
     lyricLastForeignResize = { x: b.x, y: b.y, width: b.width, height: b.height };
+    lyricGeomLog('foreign-resize', `lastSet=${JSON.stringify(lyricLastSetBounds)}`);
     // 150ms 后复核还在才算真外部改动：setBounds 中间值/迟到的回声在这个窗口内自愈，
     // 不再一杆子打进 450ms 隐身流程。真·切屏时系统会把窗口挪到错误位置且持续存在，
     // 复核照样通过，行为不受影响。
@@ -1315,13 +1410,23 @@ function applyLyricDisplayChange() {
   const d = currentLyricDisplay();
   const changed = lyricDisplayId !== null && lyricDisplayId !== d.id;
   lyricDisplayId = d.id;
-  if (changed) {
+  // 同一块屏改分辨率（4K↔2K，display id 不变）也算「换屏」：旧屏量出的 fit 宽度
+  // 和拖动锚点是旧几何下的产物，不清就会按旧宽/旧中心摆窗（2026-11-25 用户反馈：
+  // 4K 转 2K 后歌词超出屏幕）。分辨率/DPI 任一变了都清，代价只是回到新屏正中。
+  const geom = { w: d.bounds.width, h: d.bounds.height, dpr: d.scaleFactor };
+  const geomChanged = !!lyricLastDisplayGeom &&
+    (lyricLastDisplayGeom.w !== geom.w || lyricLastDisplayGeom.h !== geom.h || lyricLastDisplayGeom.dpr !== geom.dpr);
+  const oldGeom = lyricLastDisplayGeom;
+  lyricLastDisplayGeom = geom;
+  if (changed || geomChanged) {
+    lyricGeomLog('display-reset', `${changed ? 'cross-screen' : 'same-screen-res-change'} oldGeom=${JSON.stringify(oldGeom)} newGeom=${JSON.stringify(geom)}`);
     lyricFitW = 0; // 旧显示器 DPI 下量出的宽度在新屏上不作数
     // 跨屏后旧锚点直接作废，不能只在「越界」时才清：主屏中心 1280 在
     // 1920 宽的第二屏里仍是合法值，不清就会停在偏右 246px 的位置。
     // 代价是切屏后回到新屏正中——这正是期望行为（拖过的自定义位置跨屏失效合理）。
     lyricTaskbarCenter = null;
     lyricTaskbarX = null;
+    lyricLastForeignResize = null;
   }
   if (lyricDesktopPos) {
     const wa = d.workArea;

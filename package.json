@@ -1,6 +1,6 @@
 {
   "name": "musicsmx",
-  "version": "1.2.3",
+  "version": "1.2.4",
   "description": "MusicSMX - 本地音乐播放器（Electron + 原生前端，无框架）",
   "main": "src/main.js",
   "author": "Sunman & SMX",
@@ -27,12 +27,20 @@
     "appId": "com.musicsmx.player",
     "productName": "MusicSMX",
     "directories": {
-      "output": "release-v41",
+      "output": "release-v42",
       "buildResources": "build"
     },
     "electronLanguages": [
+      "en-US",
       "zh-CN",
-      "en-US"
+      "zh-TW",
+      "ja",
+      "ko",
+      "en-GB",
+      "de",
+      "fr",
+      "es",
+      "ru"
     ],
     "files": [
       "src/**/*",
