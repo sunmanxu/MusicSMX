@@ -1816,18 +1816,26 @@ function observeThumb(el, track) {
   else loadThumbImage(el);   // 老环境兜底：直接同步读
 }
 
-// 占位歌曲联网补封面限流：同时在跑的补图请求不超过 3 个，防止滚一遍列表打出几十个请求
+// 列表缩略图联网补封面限流：同时在跑的请求不超过 3 个，防止滚一遍列表打出几十个请求。
+// 2026-11-25：真实曲目缺封面时也走这条路（以前只有占位歌补图，「男孩」「桃花诺」要双击播放才刷新）。
+const thumbFetchingCountMax = 3;
 let thumbFetchingCount = 0;
 const thumbFetchQueue = [];
+const thumbFetchAttempted = new Set();  // path -> 本次会话已试过，失败不随每次 render 反复请求
 
 function queueThumbFetch(track) {
-  if (!track || track.cover || S.coverCache.has(track.path)) return;
+  if (!track || !track.path) return;
+  if (S.settings.autoCover === false) return;   // 用户关了「自动获取封面」就别联网
+  if (track.cover || S.coverCache.has(track.path) || S.thumbCache.has(track.path)) return;
+  if (S.fetchingCover.has(track.path) || thumbFetchAttempted.has(track.path)) return;
+  if (thumbFetchQueue.some(t => t.path === track.path)) return;
+  thumbFetchAttempted.add(track.path);
   thumbFetchQueue.push(track);
   drainThumbFetchQueue();
 }
 
 function drainThumbFetchQueue() {
-  while (thumbFetchingCount < 3 && thumbFetchQueue.length) {
+  while (thumbFetchingCount < thumbFetchingCountMax && thumbFetchQueue.length) {
     const t = thumbFetchQueue.shift();
     thumbFetchingCount++;
     fetchAndApplyCover(t, true).catch(() => {}).finally(() => {
@@ -1863,8 +1871,9 @@ async function loadThumbImage(el) {
       img.alt = '';
       el.textContent = '';
       el.appendChild(img);
-    } else if (!url && track && track.isPlaceholder === true) {
-      // 占位/缺失歌曲：本地没缓存就联网补一张（限流 3 并发，取到后 applyCover 会自动贴上来）
+    } else if (!url && track && track.path) {
+      // 本地没缓存就联网补一张（占位歌 + 真实歌都补；限流 3 并发，
+      // 取到后 applyCover 会自动贴到列表缩略图上，不用双击播放）
       queueThumbFetch(track);
     }
   } catch (e) { /* 读不到就保持音符占位 */ }
@@ -1882,7 +1891,7 @@ function createTrackRow(t, i, cur) {
   // 有缓存封面直接贴图；没有先摆音符占位，滚进可视区再从本地缓存文件懒加载。
   const cIndex = document.createElement('div');
   cIndex.className = 't-index';
-  const coverKey = `${t.artist || ''} - ${t.title || ''}`.toLowerCase().replace(/[\\/:*?"<>|]/g, '_').trim();
+  const coverKey = mediaCacheKey(t.artist, t.title);
   const thumb = document.createElement('div');
   thumb.className = 't-thumb';
   thumb.dataset.path = t.path || '';
@@ -4417,7 +4426,7 @@ async function fetchAndApplyCover(track, silent = false) {
   S.fetchingCover.add(track.path);
   const request = (async () => {
     // 检查本地缓存文件
-    const coverKey = `${track.artist} - ${track.title}`.toLowerCase().replace(/[\\/:*?"<>|]/g, '_').trim();
+    const coverKey = mediaCacheKey(track.artist, track.title);
     if (S.localCoverFiles.has(coverKey) && window.mb && window.mb.readCoverFile) {
       try {
         const res = await window.mb.readCoverFile(S.localCoverFiles.get(coverKey));
@@ -8842,7 +8851,7 @@ document.querySelectorAll('#context-menu .ctx-item').forEach(item => {
       case 'clear-refetch':
         // 清除海报歌词并重新获取
         (async () => {
-          const coverKey = `${track.artist} - ${track.title}`.toLowerCase().replace(/[\\/:*?"<>|]/g, '_').trim();
+          const coverKey = mediaCacheKey(track.artist, track.title);
           const lyricsKey = coverKey;
           // 1. 清除内存缓存
           S.coverCache.delete(track.path);
