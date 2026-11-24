@@ -655,7 +655,7 @@ body.popover-open #topbar { -webkit-app-region: no-drag; }
 
 #track-head {
   display: grid;
-  grid-template-columns: 36px 1fr 0.7fr 0.7fr 60px;
+  grid-template-columns: 44px 1fr 0.7fr 0.7fr 60px;
   gap: 12px;
   padding: 10px 16px 8px;
   font-size: 11px;
@@ -753,7 +753,7 @@ body.popover-open #topbar { -webkit-app-region: no-drag; }
 
 .track-row {
   display: grid;
-  grid-template-columns: 36px 1fr 0.7fr 0.7fr 60px;
+  grid-template-columns: 44px 1fr 0.7fr 0.7fr 60px;
   gap: 12px;
   align-items: center;
   height: 44px;
@@ -849,19 +849,42 @@ body.popover-open #topbar { -webkit-app-region: no-drag; }
   color: #f44336;
   background: rgba(244, 67, 54, 0.1);
 }
+/* 首列：专辑缩略图（2026-11-25 去掉序号数字，参考 QQ 音乐/网易云） */
 .track-row .t-index {
-  text-align: center;
-  color: var(--text-faint);
-  font-size: 12px;
-  font-variant-numeric: tabular-nums;
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: center;
+  color: var(--text-faint);
 }
-.track-row .t-index .idx-num { display: inline; }
-.track-row .t-index .eq { display: none; width: 22px; align-items: flex-end; justify-content: center; gap: 2px; height: 14px; }
+.track-row .t-thumb {
+  width: 32px;
+  height: 32px;
+  border-radius: 4px;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--text-faint) 14%, transparent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.track-row .t-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.track-row .t-thumb svg { opacity: 0.55; }
+.track-row.placeholder .t-thumb { opacity: 0.45; }
+/* 正在播放/当前曲：均衡器动画叠在缩略图上（半透明遮罩，QQ 音乐样式） */
+.track-row .t-index .eq {
+  display: none;
+  position: absolute;
+  inset: 0;
+  align-items: flex-end;
+  justify-content: center;
+  gap: 2px;
+  padding-bottom: 6px;
+  box-sizing: border-box;
+  background: rgba(0, 0, 0, 0.4);
+  border-radius: 4px;
+}
 .track-row.current .t-index .eq { display: flex; }
-.track-row.current .t-index .idx-num { display: none; }
 .track-row .t-title {
   display: flex;
   align-items: center;
@@ -1383,7 +1406,8 @@ body.dragging #content::after {
   #add-folder span { display: none; }
   .track-row .t-album { display: none; }
   #track-head .col-album { display: none; }
-  .track-row, #track-head { grid-template-columns: 32px 1fr 0.8fr; }
+  .track-row, #track-head { grid-template-columns: 40px 1fr 0.8fr; }
+  .track-row .t-thumb { width: 28px; height: 28px; }
   .track-row .row-actions { right: 8px; }
   .track-row { height: 36px; }
   .ctl.big { width: 38px; height: 38px; }
@@ -1391,6 +1415,7 @@ body.dragging #content::after {
 /* 大窗口优化 */
 @media (min-width: 1400px) {
   .track-row { height: 48px; }
+  .track-row .t-thumb { width: 36px; height: 36px; }
   #track-head { padding: 12px 18px 10px; }
   #track-list { padding: 6px 10px 24px; }
   #sidebar { width: 220px; }

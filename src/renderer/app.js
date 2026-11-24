@@ -370,6 +370,7 @@ const S = {
   // 本地缓存文件列表（启动时扫描）
   localCoverFiles: new Map(), // key(artist-title小写) -> 文件路径
   localLyricsFiles: new Map(), // key(artist-title小写) -> 文件路径
+  thumbCache: new Map(), // path -> 缩略图 dataUrl（列表懒加载用，FIFO 上限淘汰防内存膨胀）
   // 电台
   currentView: 'music',    // music | radio
   radioFilter: 'all',      // all | 国内 | 国外 | 音乐 | 新闻 | recent | fav
@@ -1792,6 +1793,56 @@ document.querySelectorAll('#online-track-menu .ctx-item').forEach((item) => {
   });
 });
 
+// ---------- 列表缩略图懒加载 ----------
+// 1300+ 行不能每行都同步读封面文件：滚进可视区才读，读完进 thumbCache（FIFO 上限 200）
+let thumbIO = null;
+if ('IntersectionObserver' in window) {
+  thumbIO = new IntersectionObserver((entries) => {
+    for (const en of entries) {
+      const el = en.target;
+      // 虚拟列表滚动会大量销毁行：已脱离 DOM 的直接取消观察防泄漏
+      if (!el.isConnected) { thumbIO.unobserve(el); continue; }
+      if (!en.isIntersecting) continue;
+      thumbIO.unobserve(el);
+      loadThumbImage(el);
+    }
+  }, { root: document.getElementById('track-list'), rootMargin: '300px 0px' });
+}
+
+function observeThumb(el) {
+  if (thumbIO) thumbIO.observe(el);
+  else loadThumbImage(el);   // 老环境兜底：直接同步读
+}
+
+async function loadThumbImage(el) {
+  if (!el || el.dataset.loaded) return;
+  el.dataset.loaded = '1';
+  const trackPath = el.dataset.path;
+  const key = el.dataset.key;
+  try {
+    let url = trackPath ? (S.coverCache.get(trackPath) || S.thumbCache.get(trackPath)) : null;
+    if (!url && key && S.localCoverFiles.has(key) && window.mb && window.mb.readCoverFile) {
+      const res = await window.mb.readCoverFile(S.localCoverFiles.get(key));
+      if (res.ok && res.dataUrl) {
+        url = res.dataUrl;
+        if (trackPath) {
+          S.thumbCache.set(trackPath, url);
+          if (S.thumbCache.size > 200) {
+            S.thumbCache.delete(S.thumbCache.keys().next().value);  // FIFO 淘汰最旧的
+          }
+        }
+      }
+    }
+    if (url && el.isConnected) {
+      const img = document.createElement('img');
+      img.src = url;
+      img.alt = '';
+      el.textContent = '';
+      el.appendChild(img);
+    }
+  } catch (e) { /* 读不到就保持音符占位 */ }
+}
+
 function createTrackRow(t, i, cur) {
   // 网络歌曲行（歌手筛选追加的灰色行）：独立构建，不可播放
   if (t.isOnline) return createOnlineTrackRow(t);
@@ -1800,15 +1851,37 @@ function createTrackRow(t, i, cur) {
   row.className = 'track-row' + (cur === t ? ' current' : '') + (cur === t && S.playing ? ' playing' : '') + (isPlaceholder ? ' placeholder' : '');
   row.dataset.idx = S.tracks.indexOf(t);
 
+  // 首列：专辑缩略图（参考 QQ 音乐/网易云，2026-11-25 用户要求去掉序号数字）。
+  // 有缓存封面直接贴图；没有先摆音符占位，滚进可视区再从本地缓存文件懒加载。
   const cIndex = document.createElement('div');
   cIndex.className = 't-index';
+  const coverKey = `${t.artist || ''} - ${t.title || ''}`.toLowerCase().replace(/[\\/:*?"<>|]/g, '_').trim();
+  const thumb = document.createElement('div');
+  thumb.className = 't-thumb';
+  thumb.dataset.path = t.path || '';
+  thumb.dataset.key = coverKey;
+  thumb.title = t.album ? (t.album + '（点击筛选该专辑，自动联网补齐其余歌曲）') : '';
+  // 与专辑列一致：单击缩略图筛选专辑（不触发整行选中）
+  if (t.album) {
+    thumb.addEventListener('click', (e) => {
+      e.stopPropagation();
+      toggleTrackFilter('album', t.album);
+    });
+  }
+  const coverUrl = t.cover || S.coverCache.get(t.path) || S.thumbCache.get(t.path) || null;
+  if (coverUrl) {
+    const img = document.createElement('img');
+    img.src = coverUrl;
+    img.alt = '';
+    thumb.appendChild(img);
+  } else if (!t.isPlaceholder) {
+    thumb.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M12 3v10.55A4 4 0 1 0 14 17V7h4V3h-6z"/></svg>';
+    observeThumb(thumb);
+  }
   const eq = document.createElement('span');
   eq.className = 'eq';
   eq.innerHTML = '<i></i><i></i><i></i>';
-  const idxNum = document.createElement('span');
-  idxNum.className = 'idx-num';
-  idxNum.textContent = S.tracks.indexOf(t) + 1;
-  cIndex.append(eq, idxNum);
+  cIndex.append(thumb, eq);
 
   const cTitle = document.createElement('div');
   cTitle.className = 't-title';
@@ -4365,6 +4438,17 @@ async function fetchAndApplyCover(track, silent = false) {
 function applyCover(track, dataUrl) {
   if (!track || !dataUrl) return;
   track.cover = dataUrl;
+  // 列表缩略图同步：虚拟列表只渲染几十行，遍历换图开销可忽略；
+  // 只补还没贴图的（懒加载兜底的那张），已有的不动避免闪烁
+  document.querySelectorAll('#track-list .t-thumb[data-path]').forEach(el => {
+    if (el.dataset.path === track.path && !el.querySelector('img')) {
+      el.textContent = '';
+      const img = document.createElement('img');
+      img.src = dataUrl;
+      img.alt = '';
+      el.appendChild(img);
+    }
+  });
   // 关键守卫：只有「当前正在播的那首」才允许刷界面。
   // 否则上一首的请求晚到、或在列表里右键给别的歌取封面，都会把不属于当前歌的图
   // 贴到左下角播放栏和全屏海报上（用户反馈的「缩略图跟实际海报不匹配」）。
