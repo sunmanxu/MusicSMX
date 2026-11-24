@@ -387,6 +387,7 @@ let lyricStyle = {
   layout: 'dual'        // single 单行 | dual 双行（两行原位交替，不滚动）
 };
 let lyricFitW = 0;          // 任务栏模式：渲染端实测的「内容该多宽」
+let lyricStripGeom = null;  // 任务栏条真实几何 {h, anchor}，右键迷你窗贴条定位用（窗口含透明区，不能按整窗算）
 let lyricTaskbarX = null;   // 任务栏模式：用户拖到的左上角 x（兼容旧值，实际以 center 为准）
 // 任务栏模式的锚点用「文字中心」而不是左上角：窗口宽度跟着歌词长短变，
 // 用左边界锚定的话宽度一变、居中显示的文字就整体横移 —— 用户看到的
@@ -594,6 +595,7 @@ function applyLyricBounds(display) {
     //（发两遍：setBounds 前后各一次，保证 resize 回调触发 applyFont 时已收到）
     if (nb.stripH) {
       const geomMsg = { h: nb.stripH, anchor: nb.stripAnchor || 'bottom' };
+      lyricStripGeom = geomMsg;
       try {
         lyricWin.webContents.send('lyric-geom', geomMsg);
       } catch (e) { /* 窗口正在销毁 */ }
@@ -698,10 +700,15 @@ function keepLyricOnTop() {
   } catch (e) {
     try { lyricWin.setAlwaysOnTop(true); } catch (e2) { /* 窗口刚销毁，忽略 */ }
   }
-  // 迷你窗开着时不动 z 序：迷你窗底边与任务栏歌词有十几像素重叠，moveTop 会把歌词
-  // 「翻」到刚打开的迷你窗上面，表现为每次开小窗歌词闪一下（2026-11-20 用户反馈）。
-  // 迷你窗收起后守卫恢复，歌词照常被提回任务栏之上。
+  // 小窗开着时不动 z 序：小窗底边与任务栏歌词有十几像素重叠，moveTop 会把歌词
+  // 「翻」到刚打开的小窗上面，表现为每次开小窗歌词闪一下（2026-11-20 用户反馈）。
+  // 小窗收起后守卫恢复，歌词照常被提回任务栏之上。
+  // 2026-11-25：右键迷你控制条（lyricRemoteWin）也必须纳入——它 focus() 后歌词窗
+  // 30ms 心跳的 moveTop 会把它踢出 z 序顶部 → blur → 立刻 hide()，用户看到的就是
+  // 「右键小悬浮窗弹不出来」。托盘小窗（miniPlayer）用 miniCollapsed 标记，右键条
+  // 是独立窗口，这里直接查 isVisible()。
   if (!miniCollapsed) return;
+  if (lyricRemoteWin && !lyricRemoteWin.isDestroyed() && lyricRemoteWin.isVisible()) return;
   if (typeof lyricWin.moveTop === 'function') lyricWin.moveTop();
 }
 function stopLyricTopGuard() {
@@ -1158,8 +1165,11 @@ function ensureLyricRemoteWin() {
   // 要盖过歌词窗（歌词窗本身有 top guard 定时保顶，用更高层级压住）
   lyricRemoteWin.setAlwaysOnTop(true, 'screen-saver');
   // 失焦自动收起：点控制条以外的任何地方（含歌词窗、主窗口）都收起。
-  // 点控制条内部按钮焦点仍在本窗不会触发 blur，无-extra 守卫需要。
+  // 点控制条内部按钮焦点仍在本窗不会触发 blur。
+  // 2026-11-25：弹出瞬间加宽限期——show()+focus() 时系统/歌词窗保顶会回送一次
+  // 聚焦回声，blur 紧跟其后误触发隐藏，表现为「右键小窗一闪就没了」。
   lyricRemoteWin.on('blur', () => {
+    if (Date.now() - (lyricRemoteWin._shownAt || 0) < 300) return;
     if (lyricRemoteWin && !lyricRemoteWin.isDestroyed() && lyricRemoteWin.isVisible()) {
       lyricRemoteWin.hide();
     }
@@ -1177,18 +1187,25 @@ function hideLyricRemote() {
 function showLyricRemote() {
   if (!lyricWin || lyricWin.isDestroyed() || lyricMode === 'off') return;
   const rw = ensureLyricRemoteWin();
-  // 定位：歌词窗正上方居中；上方放不下（顶部任务栏场景）改放下方
+  // 定位：紧贴「歌词条」居中，不按整窗算——窗口为了突破 64px 地板多出一大截透明区
+  // （72px 窗里条只有 40px），按整窗定位会让小窗悬在半空离任务栏一大段（用户反馈）。
+  // 条真实高度/锚点在 applyLyricBounds 时记为 lyricStripGeom。
   const lb = lyricWin.getBounds();
   const display = currentLyricDisplay();
   const wa = display.workArea;
   const rb = rw.getBounds();
   const rwW = rb.width, rwH = rb.height;
+  const atTop = lyricStripGeom && lyricStripGeom.anchor === 'top';
+  const stripH = lyricStripGeom ? lyricStripGeom.h : lb.height;
+  const stripY = atTop ? lb.y : Math.max(lb.y, lb.y + lb.height - stripH);
+  const stripBottom = stripY + stripH;
   let x = Math.round(lb.x + lb.width / 2 - rwW / 2);
-  let y = Math.round(lb.y - rwH - 10);
-  if (y < wa.y) y = Math.round(lb.y + lb.height + 10);
+  let y = Math.round(atTop ? stripBottom + 4 : stripY - rwH - 4);
+  if (y < wa.y) y = Math.round(stripBottom + 4);
   x = Math.max(wa.x, Math.min(wa.x + wa.width - rwW, x));
   rw.setBounds({ x, y, width: rwW, height: rwH });
   if (!rw.isVisible()) {
+    rw._shownAt = Date.now();
     rw.show();
     rw.focus();
   }

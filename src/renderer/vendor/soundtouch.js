@@ -1,6 +1,7 @@
 /* SoundTouchJS 0.3.0 — vendored from npm soundtouchjs (https://github.com/cutterbl/SoundTouchJS)
  * License: LGPL-2.1（见同目录 soundtouch.LICENSE）
- * 唯一改动：末尾 ESM export 改为挂 window.SoundTouchJS，供经典 script 加载。
+ * 改动：①末尾 ESM export 改为挂 window.SoundTouchJS，供经典 script 加载；
+ *       ②RateTransposer.transpose 线性插值改 Catmull-Rom 三次插值（减少升调阶梯失真/滋啦声）。
  * 语义：setPitch(P) 时 tempo=1/P、rate=P → 变调不变速（升降调用）。 */
 /*
  * SoundTouch JS v0.3.0 audio processing library
@@ -169,6 +170,16 @@ class RateTransposer extends AbstractFifoSamplePipe {
     this._inputBuffer.receive();
     this._outputBuffer.put(numFramesOutput);
   }
+  // MusicSMX 改动（2026-11-25）：线性插值 → Catmull-Rom 三次插值。
+  // 上游原版用相邻两点连直线做重采样，升调（rate>1）时会抹掉波形曲率、产生
+  // 阶梯状高频失真，用户听到的轻微「滋啦」即源于此。三次插值取前后各一点
+  // （共 4 点）拟合曲线，保留谐波，代价只是每帧几次乘加。
+  _cubic(p0, p1, p2, p3, t) {
+    const t2 = t * t, t3 = t2 * t;
+    return 0.5 * ((2 * p1) + (-p0 + p2) * t +
+      (2 * p0 - 5 * p1 + 4 * p2 - p3) * t2 +
+      (-p0 + 3 * p1 - 3 * p2 + p3) * t3);
+  }
   transpose(numFrames = 0) {
     if (numFrames === 0) {
       return 0;
@@ -179,9 +190,18 @@ class RateTransposer extends AbstractFifoSamplePipe {
     const destOffset = this._outputBuffer.endIndex;
     let used = 0;
     let i = 0;
+    // 第一段：p1=当前块第一个样本，p0=上一块末尾（prevSample），p2/p3 向后取
+    const lastBase = srcOffset + 2 * (numFrames - 1);
     while (this.slopeCount < 1.0) {
-      dest[destOffset + 2 * i] = (1.0 - this.slopeCount) * this.prevSampleL + this.slopeCount * src[srcOffset];
-      dest[destOffset + 2 * i + 1] = (1.0 - this.slopeCount) * this.prevSampleR + this.slopeCount * src[srcOffset + 1];
+      const s = this.slopeCount;
+      const p0L = this.prevSampleL, p0R = this.prevSampleR;
+      const p1L = src[srcOffset], p1R = src[srcOffset + 1];
+      const p2L = numFrames > 1 ? src[srcOffset + 2] : p1L;
+      const p2R = numFrames > 1 ? src[srcOffset + 3] : p1R;
+      const p3L = numFrames > 2 ? src[srcOffset + 4] : p2L;
+      const p3R = numFrames > 2 ? src[srcOffset + 5] : p2R;
+      dest[destOffset + 2 * i] = this._cubic(p0L, p1L, p2L, p3L, s);
+      dest[destOffset + 2 * i + 1] = this._cubic(p0R, p1R, p2R, p3R, s);
       i = i + 1;
       this.slopeCount += this._rate;
     }
@@ -196,8 +216,15 @@ class RateTransposer extends AbstractFifoSamplePipe {
           }
         }
         const srcIndex = srcOffset + 2 * used;
-        dest[destOffset + 2 * i] = (1.0 - this.slopeCount) * src[srcIndex] + this.slopeCount * src[srcIndex + 2];
-        dest[destOffset + 2 * i + 1] = (1.0 - this.slopeCount) * src[srcIndex + 1] + this.slopeCount * src[srcIndex + 3];
+        const s = this.slopeCount;
+        const p0 = srcIndex >= srcOffset + 2 ? src[srcIndex - 2] : this.prevSampleL;
+        const p0R = srcIndex >= srcOffset + 2 ? src[srcIndex - 1] : this.prevSampleR;
+        const p2 = src[srcIndex + 2];
+        const p2R = src[srcIndex + 3];
+        const p3 = srcIndex + 4 <= lastBase ? src[srcIndex + 4] : p2;
+        const p3R = srcIndex + 4 <= lastBase ? src[srcIndex + 5] : p2R;
+        dest[destOffset + 2 * i] = this._cubic(p0, src[srcIndex], p2, p3, s);
+        dest[destOffset + 2 * i + 1] = this._cubic(p0R, src[srcIndex + 1], p2R, p3R, s);
         i = i + 1;
         this.slopeCount += this._rate;
       }
