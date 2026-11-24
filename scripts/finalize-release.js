@@ -35,7 +35,9 @@ async function gh(method, path, body, raw) {
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-// RELEASE-NOTES.md 里找 `## v1.2.3` 或 `## 1.2.3` 标题下的段落
+// RELEASE-NOTES.md 里找 `## v1.2.3` 或 `## 1.2.3` 标题下的段落。
+// 注意：目标段落后面往往还跟着更旧的版本段落，遇到下一个标题必须**收笔**，
+// 不能把已收集的置空（v1.2.4 发版时正文因此回退成了 git log 兜底）。
 function notesFromFile(version) {
   let md;
   try { md = fs.readFileSync('RELEASE-NOTES.md', 'utf8'); } catch { return null; }
@@ -43,7 +45,11 @@ function notesFromFile(version) {
   let out = null;
   for (const line of lines) {
     const h = line.match(/^##\s+v?([\d.]+)\s*$/);
-    if (h) { out = (h[1] === version) ? [] : null; continue; }
+    if (h) {
+      if (out) break;                       // 目标段已收完：下一个（更旧的）标题即终点
+      out = (h[1] === version) ? [] : null; // 目标段之前的标题跳过
+      continue;
+    }
     if (out) out.push(line);
   }
   const body = out ? out.join('\n').trim() : '';
