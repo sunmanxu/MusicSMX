@@ -10512,6 +10512,19 @@ $('btn-save-lyrics-import').addEventListener('click', () => {
 let autoFixing = false;
 let autoFixCancel = false;
 
+// 缓存 key 与主进程 safeName / 批量下载保持一致（特殊字符替换 + 截断 120 + 小写）。
+// 抽出来给两处共用，避免「批量下载用什么 key、自动修复拿什么判断『已有』」漂移。
+function mediaCacheKey(artist, title) {
+  return String(`${artist || ''} - ${title || ''}`).replace(/[\\/:*?"<>|]/g, '_').trim().slice(0, 120).toLowerCase();
+}
+// 封面和歌词都已有（内存缓存或本地文件都算）——自动修复可用它整首跳过。
+function trackHasSavedCoverAndLyrics(track) {
+  if (!track || !track.path || track.isPlaceholder) return false;
+  const key = mediaCacheKey(track.artist, track.title);
+  return (S.coverCache.has(track.path) || S.localCoverFiles.has(key))
+      && (S.lyricsCache.has(track.path) || S.localLyricsFiles.has(key));
+}
+
 // ---------- 批量下载专辑封面和歌词 ----------
 let batchDownloading = false;
 let batchDownloadCancel = false;
@@ -10553,9 +10566,8 @@ async function startBatchDownload() {
     progress.style.width = ((i + 1) / total * 100) + '%';
 
     try {
-      // 生成缓存key（和服务端safeName保持一致：替换特殊字符 + 截断120字符）
-      const safeKey = (s) => String(s || '').replace(/[\\/:*?"<>|]/g, '_').trim().slice(0, 120).toLowerCase();
-      const coverKey = safeKey(`${track.artist} - ${track.title}`);
+      // 生成缓存key（和服务端safeName保持一致；复用公共函数，自动修复判定同一规则）
+      const coverKey = mediaCacheKey(track.artist, track.title);
       // 下载封面（如果本地缓存没有）
       if (!S.coverCache.has(track.path) && !S.localCoverFiles.has(coverKey)) {
         const res = await mb.fetchCover(track.artist, track.title);
@@ -11067,17 +11079,35 @@ function updateAutofixBar(current, total, fixed, skip, fail, writeFail) {
 async function autoFixAll() {
   if (autoFixing) { toast('正在修复中，请稍候...'); return; }
   if (S.tracks.length === 0) { toast('没有可修复的歌曲'); return; }
-  // 确认提示：会修改源文件
-  const alreadyFixedCount = Object.keys(S.settings.fixedTracks || {}).length;
+
+  // 先筛掉占位/锁定/已修复的曲目，别让进度条在整库上空走一遍（2026-11-25 用户反馈）
+  const eligible = S.tracks
+    .map((track, idx) => ({ track, idx }))
+    .filter(({ track }) => track && track.path && !track.isPlaceholder
+      && !(S.settings.lockedTracks && S.settings.lockedTracks[track.path])
+      && !(S.settings.fixedTracks && S.settings.fixedTracks[track.path]));
+  const skippedBasic = S.tracks.length - eligible.length;
+  const withMedia = eligible.filter(({ track }) => trackHasSavedCoverAndLyrics(track)).length;
+
+  // 确认提示：会修改源文件；本次询问是否连「封面+歌词都已有」的歌一起跳过
   let msg = `自动修复会修改音乐文件本身的 ID3 标签（标题、歌手、专辑）。\n\n建议先备份重要音乐文件。\n\n共 ${S.tracks.length} 首歌曲`;
-  if (alreadyFixedCount > 0) {
-    msg += `，其中 ${alreadyFixedCount} 首已修复过会自动跳过`;
-  }
+  if (skippedBasic > 0) msg += `，其中 ${skippedBasic} 首（占位/已锁定/已修复）会跳过`;
+  if (withMedia > 0) msg += `，另有 ${withMedia} 首已有封面和歌词`;
   msg += '，确定要继续吗？';
-  const confirmed = await showConfirm('自动修复确认', msg);
-  if (!confirmed) {
+  const answer = await showConfirmEx('自动修复确认', msg,
+    '跳过已有封面和歌词的歌曲（只扫描缺封面或歌词的，更快）', true);
+  if (!answer || !answer.ok) return;
+  const skipWithMedia = !!answer.checked;
+  const targets = skipWithMedia
+    ? eligible.filter(({ track }) => !trackHasSavedCoverAndLyrics(track))
+    : eligible;
+  const skippedBefore = S.tracks.length - targets.length;
+
+  if (targets.length === 0) {
+    toast(`没有需要修复的歌曲（${skippedBefore} 首已跳过）`);
     return;
   }
+
   autoFixing = true;
   autoFixCancel = false;
   let fixedCount = 0;
@@ -11085,29 +11115,15 @@ async function autoFixAll() {
   let failCount = 0;
   let writeFailCount = 0;
   let renameCount = 0;
-  // 显示内嵌进度条
+  // 显示内嵌进度条：只统计真正要联网扫描的曲目
+  const total = targets.length;
   $('autofix-bar').style.display = 'flex';
-  updateAutofixBar(0, S.tracks.length, 0, 0, 0, 0);
-  toast('已开始自动修复，进度在顶栏下方显示');
-  for (let i = 0; i < S.tracks.length; i++) {
+  updateAutofixBar(0, total, 0, 0, 0, 0);
+  toast(`已开始自动修复，${skippedBefore} 首已跳过，进度在顶栏下方显示`);
+  for (let i = 0; i < total; i++) {
     if (autoFixCancel) break;
-    const track = S.tracks[i];
-    updateAutofixBar(i, S.tracks.length, fixedCount, skipCount, failCount, writeFailCount);
-    // 占位/缺失歌曲跳过（本地无文件）
-    if (track.isPlaceholder) {
-      skipCount++;
-      continue;
-    }
-    // 已锁定的歌曲自动跳过
-    if (S.settings.lockedTracks && S.settings.lockedTracks[track.path]) {
-      skipCount++;
-      continue;
-    }
-    // 已修复过的歌曲自动跳过
-    if (S.settings.fixedTracks && S.settings.fixedTracks[track.path]) {
-      skipCount++;
-      continue;
-    }
+    const { track, idx } = targets[i];
+    updateAutofixBar(i, total, fixedCount, skipCount, failCount, writeFailCount);
     try {
       const result = await mb.autoFixTrack(track.artist, track.title, track.album || '', track.duration || 0);
       if (result && result.needFix) {
@@ -11125,7 +11141,7 @@ async function autoFixAll() {
             } else {
               // 写入成功后自动重命名文件为 歌手 - 标题
               try {
-                const renamed = await renameTrackFile(i, true);
+                const renamed = await renameTrackFile(idx, true);
                 if (renamed) renameCount++;
               } catch (renameErr) {
                 console.error('重命名失败:', track.path, renameErr.message);
@@ -11148,7 +11164,7 @@ async function autoFixAll() {
       failCount++;
     }
     // 每 10 首更新一次列表（减少频率避免音频中断）
-    if ((i + 1) % 10 === 0 || i === S.tracks.length - 1) {
+    if ((i + 1) % 10 === 0 || i === total - 1) {
       renderList();
     }
     // 避免请求过快
@@ -11156,9 +11172,12 @@ async function autoFixAll() {
   }
   renderList();
   if (S.current >= 0) updateNowPlaying();
-  updateAutofixBar(S.tracks.length, S.tracks.length, fixedCount, skipCount, failCount, writeFailCount);
+  updateAutofixBar(total, total, fixedCount, skipCount, failCount, writeFailCount);
   const done = autoFixCancel ? '已取消' : '修复完成';
   let summary = `${done}！已修复${fixedCount}首，无需修复${skipCount}首，失败${failCount}首`;
+  if (skippedBefore > 0) {
+    summary += `，跳过${skippedBefore}首（占位/已锁定/已修复${skipWithMedia ? '/已有封面歌词' : ''}）`;
+  }
   if (renameCount > 0) {
     summary += `，文件名已更新${renameCount}首`;
   }
