@@ -1795,6 +1795,7 @@ document.querySelectorAll('#online-track-menu .ctx-item').forEach((item) => {
 
 // ---------- 列表缩略图懒加载 ----------
 // 1300+ 行不能每行都同步读封面文件：滚进可视区才读，读完进 thumbCache（FIFO 上限 200）
+const thumbTrackMap = new WeakMap();  // 缩略图元素 -> 曲目对象（观察回调里取回）
 let thumbIO = null;
 if ('IntersectionObserver' in window) {
   thumbIO = new IntersectionObserver((entries) => {
@@ -1809,9 +1810,31 @@ if ('IntersectionObserver' in window) {
   }, { root: document.getElementById('track-list'), rootMargin: '300px 0px' });
 }
 
-function observeThumb(el) {
+function observeThumb(el, track) {
+  if (track) thumbTrackMap.set(el, track);
   if (thumbIO) thumbIO.observe(el);
   else loadThumbImage(el);   // 老环境兜底：直接同步读
+}
+
+// 占位歌曲联网补封面限流：同时在跑的补图请求不超过 3 个，防止滚一遍列表打出几十个请求
+let thumbFetchingCount = 0;
+const thumbFetchQueue = [];
+
+function queueThumbFetch(track) {
+  if (!track || track.cover || S.coverCache.has(track.path)) return;
+  thumbFetchQueue.push(track);
+  drainThumbFetchQueue();
+}
+
+function drainThumbFetchQueue() {
+  while (thumbFetchingCount < 3 && thumbFetchQueue.length) {
+    const t = thumbFetchQueue.shift();
+    thumbFetchingCount++;
+    fetchAndApplyCover(t, true).catch(() => {}).finally(() => {
+      thumbFetchingCount--;
+      drainThumbFetchQueue();
+    });
+  }
 }
 
 async function loadThumbImage(el) {
@@ -1819,6 +1842,7 @@ async function loadThumbImage(el) {
   el.dataset.loaded = '1';
   const trackPath = el.dataset.path;
   const key = el.dataset.key;
+  const track = thumbTrackMap.get(el) || null;
   try {
     let url = trackPath ? (S.coverCache.get(trackPath) || S.thumbCache.get(trackPath)) : null;
     if (!url && key && S.localCoverFiles.has(key) && window.mb && window.mb.readCoverFile) {
@@ -1839,6 +1863,9 @@ async function loadThumbImage(el) {
       img.alt = '';
       el.textContent = '';
       el.appendChild(img);
+    } else if (!url && track && track.isPlaceholder === true) {
+      // 占位/缺失歌曲：本地没缓存就联网补一张（限流 3 并发，取到后 applyCover 会自动贴上来）
+      queueThumbFetch(track);
     }
   } catch (e) { /* 读不到就保持音符占位 */ }
 }
@@ -1860,23 +1887,20 @@ function createTrackRow(t, i, cur) {
   thumb.className = 't-thumb';
   thumb.dataset.path = t.path || '';
   thumb.dataset.key = coverKey;
-  thumb.title = t.album ? (t.album + '（点击筛选该专辑，自动联网补齐其余歌曲）') : '';
-  // 与专辑列一致：单击缩略图筛选专辑（不触发整行选中）
-  if (t.album) {
-    thumb.addEventListener('click', (e) => {
-      e.stopPropagation();
-      toggleTrackFilter('album', t.album);
-    });
-  }
+  thumb.title = t.album || '';
+  // 缩略图不拦截点击：单击=选中整行、双击=播放，跟点歌名完全一致
+  // （2026-11-25 用户要求去掉"点缩略图筛选专辑"）
   const coverUrl = t.cover || S.coverCache.get(t.path) || S.thumbCache.get(t.path) || null;
   if (coverUrl) {
     const img = document.createElement('img');
     img.src = coverUrl;
     img.alt = '';
     thumb.appendChild(img);
-  } else if (!t.isPlaceholder) {
+  } else {
+    // 音符占位，滚进可视区再补：本地有缓存封面读文件；
+    // 占位/缺失歌曲（QQ 导入的条目）本地没有就联网补全（2026-11-25 用户要求）
     thumb.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M12 3v10.55A4 4 0 1 0 14 17V7h4V3h-6z"/></svg>';
-    observeThumb(thumb);
+    observeThumb(thumb, t);
   }
   const eq = document.createElement('span');
   eq.className = 'eq';
@@ -5902,10 +5926,11 @@ if (window.mb && mb.onTrayControl) {
         toggleFavorite(S.tracks[S.current].path);
       }
     } else if (action === 'toggle-lyric') {
-      // 托盘小窗的歌词键：只管开关。关 → 恢复上次的悬浮/任务栏模式；开 → 记住当前模式再关
+      // 托盘小窗的歌词键：只管开关。开 = 任务栏歌词（2026-11-25 用户要求：
+      // 打开默认就是任务栏 + 鼠标穿透，桌面悬浮模式去菜单里手动切）
       const cur = S.settings.desktopLyric || 'off';
       if (cur === 'off') {
-        setDesktopLyricMode(S.settings.desktopLyricLast || 'desktop');
+        setDesktopLyricMode('taskbar');
       } else {
         setDesktopLyricMode('off');
       }
@@ -12608,6 +12633,11 @@ function setDesktopLyricMode(mode) {
   applyLyricMetricsForMode();
   saveConfig();
   if (window.mb && typeof mb.setDesktopLyricMode === 'function') mb.setDesktopLyricMode(mode);
+  // 每次开启都把穿透配置推一遍：鼠标穿透默认开（配置没存过 false 就是开），
+  // 别让主进程默认值和配置漂移（2026-11-25 用户要求开启即穿透）
+  if (mode !== 'off' && window.mb && typeof mb.setLyricClickThrough === 'function') {
+    mb.setLyricClickThrough(S.settings.lyricClickThrough !== false);
+  }
   refreshDesktopLyricUI();
   lastLyricPayload = '';
   syncDesktopLyric();
