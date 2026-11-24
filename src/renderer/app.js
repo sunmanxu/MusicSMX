@@ -4544,8 +4544,10 @@ async function fetchAndApplyLyrics(track, silent = false) {
         renderLyrics(lyricsData);
         applyLyricSourceFromData(lyricsData);
         updateLyricsModeButtons();
-        // 本地歌词没有翻译时，异步尝试网络获取有翻译的歌词
-        (async () => {
+        // 本地缓存没有翻译才联网补（已带翻译的缓存每次播放都联网一遍是浪费，
+        // 且补到的版本会覆盖重写缓存文件）；边车 tlyric 有值就到此为止
+        if (!(res.tlyric && res.tlyric.trim())) {
+          (async () => {
           try {
             const netRes = await mb.fetchLyrics(track.artist, track.title, trackDurationSec(track));
             if (netRes.ok && netRes.lrc && netRes.tlyric && netRes.tlyric.trim().length > 0) {
@@ -4569,7 +4571,8 @@ async function fetchAndApplyLyrics(track, silent = false) {
           } catch (e) {
             console.error('自动获取翻译歌词失败:', e);
           }
-        })();
+          })();
+        }
         return true;
       }
     } catch (e) {
@@ -9726,27 +9729,39 @@ function loadPitchLib() {
   return pitchFx.libP;
 }
 
+// 泵的复用缓冲：每 85ms 一轮回调里临时分配大数组会加剧 GC 停顿（音频线程卡顿=爆音）
+const pitchPumpBuf = { inter: null, tmp: null };
+
 function pitchPump(e) {
   const st = pitchFx.st;
+  const outL = e.outputBuffer.getChannelData(0);
+  const outR = e.outputBuffer.numberOfChannels > 1 ? e.outputBuffer.getChannelData(1) : outL;
+  // ScriptProcessorNode 的 outputBuffer 两次回调之间不清零，残留的是上一轮旧音频——
+  // 产出不足时尾巴整段重复播放 = 周期性刺啦声，必须先整体归零（欠载宁短暂静音）
+  outL.fill(0);
+  if (outR !== outL) outR.fill(0);
   if (!st) return;
   const inL = e.inputBuffer.getChannelData(0);
   const inR = e.inputBuffer.numberOfChannels > 1 ? e.inputBuffer.getChannelData(1) : inL;
   const n = e.inputBuffer.length;
-  const interleaved = new Float32Array(n * 2);
-  for (let i = 0; i < n; i++) { interleaved[i * 2] = inL[i]; interleaved[i * 2 + 1] = inR[i]; }
+  let inter = pitchPumpBuf.inter;
+  if (!inter || inter.length !== n * 2) inter = pitchPumpBuf.inter = new Float32Array(n * 2);
+  for (let i = 0; i < n; i++) { inter[i * 2] = inL[i]; inter[i * 2 + 1] = inR[i]; }
   // putSamples 的 numFrames 只有传负数才会按数组长度推导，缺省 0 = 塞 0 帧（整条静音的根因）
-  st._inputBuffer.putSamples(interleaved, 0, n);
-  st.process();
+  st._inputBuffer.putSamples(inter, 0, n);
+  // WSOLA 前瞻攒缓冲期间一轮 process() 产不出满 n 帧，欠载就会周期掉帧——
+  // 循环驱动直到本轮回调够量（输入耗尽或 16 轮兜底，防死循环）
+  for (let k = 0; k < 16 && st._outputBuffer.frameCount < n && st._inputBuffer.frameCount > 0; k++) {
+    st.process();
+  }
   const ob = st._outputBuffer;
-  const outL = e.outputBuffer.getChannelData(0);
-  const outR = e.outputBuffer.getChannelData(1);
   const avail = Math.min(n, ob.frameCount);
   if (avail > 0) {
-    const tmp = new Float32Array(avail * 2);
+    let tmp = pitchPumpBuf.tmp;
+    if (!tmp || tmp.length < avail * 2) tmp = pitchPumpBuf.tmp = new Float32Array(avail * 2);
     ob.receiveSamples(tmp, avail);
     for (let i = 0; i < avail; i++) { outL[i] = tmp[i * 2]; outR[i] = tmp[i * 2 + 1]; }
   }
-  // 其余输出帧保持 0：WSOLA 需要先攒一段前瞻缓冲，稳态吞吐 1:1 后自动填满
 }
 
 function applyPitchToSt() {
@@ -9819,8 +9834,10 @@ function syncPitchUI() {
   $('pitch-val').textContent = v === 0 ? '原调' : (v > 0 ? '升 ' + v : '降 ' + (-v)) + ' 半音';
 }
 
-// 拖进度条会换音频位置：SoundTouch FIFO 里还存着旧位置的样本，清掉防止串味
+// 拖进度条/换歌都会换音频位置：SoundTouch FIFO 里还存着旧样本，清掉防止串味
+// （seeked 覆盖拖进度条，emptied 覆盖切换音源——旧歌尾巴漏进新歌开头也是杂音）
 audio.addEventListener('seeked', () => { if (pitchFx.st) pitchFx.st.clear(); });
+audio.addEventListener('emptied', () => { if (pitchFx.st) pitchFx.st.clear(); });
 
 // 启动时恢复上次的升降调设置（≠0 才搭链，避免白白加载组件）
 function initPitchFromSettings() {

@@ -761,14 +761,23 @@ function saveLyricsFile(lrc, saveDir, artist, title, meta) {
     const sidecar = fpath + '.json';
     if (hasExtra) {
       try {
-        fs.writeFileSync(sidecar, JSON.stringify({
+        // 覆盖重写边车前读旧边车的 offset（歌词调速挂在边车上，
+        // 翻译补全等任何覆盖写都不能把用户调过的偏移冲掉）
+        let oldOffset;
+        try {
+          const prev = JSON.parse(fs.readFileSync(sidecar, 'utf8'));
+          if (prev && typeof prev.offset === 'number' && Math.abs(prev.offset) > 0.001) oldOffset = prev.offset;
+        } catch (e) { /* 没有旧边车或解析失败：无 offset 可保留 */ }
+        const sidecarData = {
           lrc: body,
           tlyric: payload.tlyric || '',
           rlyric: payload.rlyric || '',
           yrc: payload.yrc || '',
           songName: metaName,
           savedAt: Date.now()
-        }), 'utf8');
+        };
+        if (typeof oldOffset === 'number') sidecarData.offset = oldOffset;
+        fs.writeFileSync(sidecar, JSON.stringify(sidecarData), 'utf8');
       } catch (e) { /* 边车写失败不影响主文件 */ }
     } else if (fs.existsSync(sidecar)) {
       // 这次拿到的只有纯文本，别把之前存过的好数据覆盖没了
