@@ -1,16 +1,17 @@
 name: Release
 
 # 推送 v 开头的 tag 时自动构建并发布到 GitHub Releases：
-#   1. 改 package.json 的 version（如 1.2.1）
-#   2. git tag v1.2.1 && git push origin main --tags
-#   3. Actions 会打包 MusicSMX-1.2.1-setup.exe 并发布 Release（含 latest.yml）
-# 装好的客户端「检查更新」读的就是这个 Release。
-# 注意（2026-11-23 实测）：electron-builder 并行上传会把同一 tag 拆成两个 Draft
-# （setup.exe+latest.yml 一个、.blockmap 另一个）。构建完成后需手动处理：
-#   1. 在 Releases 页把缺失的资产补进其中一个 Draft、删掉多余 Draft
-#      （或用 API：下载 blockmap → POST 到主 Draft → DELETE 多余 Draft）
-#   2. 点 Draft 的 Publish 正式发布（草稿对未登录的 /releases/latest 不可见，
-#      不发布会「检查更新」查不到新版本）
+#   1. 改 package.json 的 version（如 1.2.3）
+#   2.（推荐）在 RELEASE-NOTES.md 写 `## v1.2.3` 更新说明段落（不写则自动用 git log）
+#   3. git tag v1.2.3 && git push origin main --tags
+#   4. Actions 全自动：打包 → 合并拆开的 Draft → 写入更新说明 → 正式发布
+# 装好的客户端「检查更新」读的就是这个 Release，页面上的更新说明来自第 2 步。
+#
+# 注意（2026-11-23 实测，2026-11-24 已自动化）：electron-builder 并行上传会把
+# 同一 tag 拆成两个 Draft（setup.exe+latest.yml 一个、.blockmap 另一个），且默认
+# 是草稿（对未登录的 /releases/latest 不可见）。构建后的 Finalize 步骤会自动
+# 合并资产、删除多余 Draft、写入 RELEASE-NOTES.md/git log 的更新说明并 draft:false
+# 正式发布，无需再手动处理。
 on:
   push:
     tags:
@@ -24,6 +25,9 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # 拉全量历史：自动生成更新说明需要「上一个 tag..HEAD」的 git log
+          fetch-depth: 0
 
       - uses: actions/setup-node@v4
         with:
@@ -36,3 +40,10 @@ jobs:
         run: npx electron-builder --win --publish always
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Finalize release (merge drafts, apply notes, publish)
+        run: node scripts/finalize-release.js
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_REF_NAME: ${{ github.ref_name }}
