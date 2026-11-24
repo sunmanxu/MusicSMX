@@ -916,7 +916,12 @@
         <input type="range" id="eq-preamp" min="-12" max="12" step="0.5" value="0" title="整体增益，提升后配合音量避免削波（右键单击归零）">
         <span id="eq-preamp-val" class="eq-val">0.0 dB</span>
       </div>
-      <div class="eq-hint">曲线为各频段叠加后的总频响；改动即时生效并记忆。拨条上右键单击可把该频段归零（前置增益同理）。参考 Web Audio 均衡器通行做法（BiquadFilter + getFrequencyResponse）实现。</div>
+      <div class="eq-preamp" style="margin-top: 6px;">
+        <span class="eq-label">升降调</span>
+        <input type="range" id="pitch-slider" min="-6" max="6" step="1" value="0" title="变调不变速，可用于唱K找调性（右键单击回原调）">
+        <span id="pitch-val" class="eq-val">原调</span>
+      </div>
+      <div class="eq-hint">曲线为各频段叠加后的总频响；改动即时生效并记忆。拨条上右键单击可把该频段归零（前置增益、升降调同理）。升降调采用 SoundTouch 算法，音调改变而速度不变。</div>
     </div>
   </div>
 </div>

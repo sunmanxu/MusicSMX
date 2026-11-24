@@ -4052,8 +4052,8 @@ function resumePlayback() {
     audio.volume = targetVolume();
   }
   if (!audio.paused) { setPlaying(true); return; }
-  // 均衡器启用中：确保音频链接好、AudioContext 恢复（autoplay 策略下可能 suspended）
-  if (eq.on) {
+  // 均衡器/升降调启用中：确保音频链接好、AudioContext 恢复（autoplay 策略下可能 suspended）
+  if (eq.on || pitchFx.on) {
     ensureEqChain();
     if (eq.ctx && eq.ctx.state === 'suspended') eq.ctx.resume().catch(() => {});
   }
@@ -9609,7 +9609,7 @@ const EQ_PRESETS = {
   apple:      [1, 0, 0, 1, 1, 0, 0, 1, 2, 2]     // 苹果：干净中性，高音稍亮
 };
 const eq = {
-  ctx: null, src: null, preamp: null, filters: [], chainOn: false,
+  ctx: null, src: null, preamp: null, filters: [], chainOn: false, chainWired: false,
   // 画曲线专用的滤波器组（不接入音频链）：gain 同步赋值，避免 setTargetAtTime
   // 渐变过程中 getFrequencyResponse 读到过渡起点（曲线显示滞后/变平）
   curveFilters: [],
@@ -9670,12 +9670,8 @@ function ensureEqChain() {
   if (!eq.ctx || eq.chainOn) return;
   try {
     eq.src = eq.ctx.createMediaElementSource(audio);
-    let node = eq.src;
-    node.connect(eq.preamp);
-    node = eq.preamp;
-    eq.filters.forEach(f => { node.connect(f); node = f; });
-    node.connect(eq.ctx.destination);
     eq.chainOn = true;
+    wireAudioGraph();  // 接「源 → (pitch 泵) → 前置增益 → 滤波链 → 输出」
     // 输出设备：进图后以 AudioContext 的 sink 为准
     if (S.audioOutputDevice && typeof eq.ctx.setSinkId === 'function') {
       eq.ctx.setSinkId(S.audioOutputDevice).catch(() => {});
@@ -9707,6 +9703,129 @@ async function applyOutputSink(deviceId) {
   } else {
     await audio.setSinkId(deviceId || '');
   }
+}
+
+// ---------- 升降调（变调不变速） ----------
+// 用 SoundTouchJS（WSOLA 算法：设 pitch=P 时内部 tempo=1/P、rate=P，时长不变）。
+// 接入点：audio 元素源 → ScriptProcessorNode 泵（把元素 PCM 喂进 SoundTouch FIFO，
+// 再从输出 FIFO 取回）→ 前置增益/均衡器链 → 输出。0 半音时直连旁路，零开销。
+// 官方 getWebAudioNode 只支持 AudioBuffer 源，这里仿其 FIFO 模式手写媒体元素泵。
+const pitchFx = { libP: null, st: null, node: null, on: false, semitones: 0 };
+
+function loadPitchLib() {
+  if (window.SoundTouchJS) return Promise.resolve();
+  if (!pitchFx.libP) {
+    pitchFx.libP = new Promise((resolve, reject) => {
+      const s = document.createElement('script');
+      s.src = 'vendor/soundtouch.js';
+      s.onload = () => (window.SoundTouchJS ? resolve() : reject(new Error('初始化异常')));
+      s.onerror = () => { pitchFx.libP = null; reject(new Error('vendor/soundtouch.js 加载失败')); };
+      document.head.appendChild(s);
+    });
+  }
+  return pitchFx.libP;
+}
+
+function pitchPump(e) {
+  const st = pitchFx.st;
+  if (!st) return;
+  const inL = e.inputBuffer.getChannelData(0);
+  const inR = e.inputBuffer.numberOfChannels > 1 ? e.inputBuffer.getChannelData(1) : inL;
+  const n = e.inputBuffer.length;
+  const interleaved = new Float32Array(n * 2);
+  for (let i = 0; i < n; i++) { interleaved[i * 2] = inL[i]; interleaved[i * 2 + 1] = inR[i]; }
+  st._inputBuffer.putSamples(interleaved);
+  st.process();
+  const ob = st._outputBuffer;
+  const outL = e.outputBuffer.getChannelData(0);
+  const outR = e.outputBuffer.getChannelData(1);
+  const avail = Math.min(n, ob.frameCount);
+  if (avail > 0) {
+    const tmp = new Float32Array(avail * 2);
+    ob.receiveSamples(tmp, avail);
+    for (let i = 0; i < avail; i++) { outL[i] = tmp[i * 2]; outR[i] = tmp[i * 2 + 1]; }
+  }
+  // 其余输出帧保持 0：WSOLA 需要先攒一段前瞻缓冲，稳态吞吐 1:1 后自动填满
+}
+
+function applyPitchToSt() {
+  if (pitchFx.st) pitchFx.st.pitch = Math.pow(2, pitchFx.semitones / 12);
+}
+
+// 按当前 pitchFx.on 把「元素源 → pitch 泵 → 前置增益」接对（EQ 关闭时滤波链增益为 0，
+// 留在链里无副作用，不用反复重接）
+function wireAudioGraph() {
+  if (!eq.src) return;
+  // 下游静态段（前置增益→滤波器→输出）只接一次；上游动态段按 pitch 状态重接
+  if (!eq.chainWired) {
+    let node = eq.preamp;
+    eq.filters.forEach(f => { node.connect(f); node = f; });
+    node.connect(eq.ctx.destination);
+    eq.chainWired = true;
+  }
+  try { eq.src.disconnect(); } catch (e) {}
+  if (pitchFx.node) { try { pitchFx.node.disconnect(); } catch (e) {} }
+  if (pitchFx.on && pitchFx.node) {
+    eq.src.connect(pitchFx.node);
+    pitchFx.node.connect(eq.preamp);
+  } else {
+    eq.src.connect(eq.preamp);
+  }
+}
+
+async function ensurePitchChain() {
+  if (pitchFx.on) return;
+  try { await loadPitchLib(); } catch (e) { toast('升降调组件加载失败：' + e.message); return; }
+  ensureEqCtx();
+  if (!eq.ctx) return;
+  if (!pitchFx.st) {
+    pitchFx.st = new window.SoundTouchJS.SoundTouch();
+    applyPitchToSt();
+    pitchFx.node = eq.ctx.createScriptProcessor(4096, 2, 2);
+    pitchFx.node.onaudioprocess = pitchPump;
+  }
+  pitchFx.on = true;
+  ensureEqChain();   // 链没建过就建（内部会 wireAudioGraph 接上 pitch 泵）
+  wireAudioGraph();  // 链已在用则重接（eq.src 此时必然存在）
+  if (eq.ctx.state === 'suspended') eq.ctx.resume().catch(() => {});
+}
+
+function setPitchSemitones(sem) {
+  sem = Math.max(-6, Math.min(6, Math.round(Number(sem) || 0)));
+  pitchFx.semitones = sem;
+  S.settings.pitchSemitones = sem;
+  if (sem === 0) {
+    if (pitchFx.on) { pitchFx.on = false; wireAudioGraph(); }
+  } else if (pitchFx.st) {
+    applyPitchToSt();
+    if (!pitchFx.on) { pitchFx.on = true; ensureEqChain(); wireAudioGraph(); }
+    if (eq.ctx && eq.ctx.state === 'suspended') eq.ctx.resume().catch(() => {});
+  } else {
+    ensurePitchChain();
+  }
+  saveConfig();
+  syncPitchUI();
+}
+
+function syncPitchUI() {
+  const sl = $('pitch-slider');
+  if (!sl) return;
+  sl.value = String(pitchFx.semitones);
+  const v = pitchFx.semitones;
+  $('pitch-val').textContent = v === 0 ? '原调' : (v > 0 ? '升 ' + v : '降 ' + (-v)) + ' 半音';
+}
+
+// 拖进度条会换音频位置：SoundTouch FIFO 里还存着旧位置的样本，清掉防止串味
+audio.addEventListener('seeked', () => { if (pitchFx.st) pitchFx.st.clear(); });
+
+// 启动时恢复上次的升降调设置（≠0 才搭链，避免白白加载组件）
+function initPitchFromSettings() {
+  const v = Number(S.settings.pitchSemitones) || 0;
+  pitchFx.semitones = Math.max(-6, Math.min(6, Math.round(v)));
+  if (pitchFx.semitones !== 0) {
+    ensurePitchChain().then(() => applyPitchToSt()).catch(() => {});
+  }
+  syncPitchUI();
 }
 
 function saveEq() {
@@ -9911,6 +10030,7 @@ function openEqModal() {
   ensureEqCtx();
   showModal('eq-modal');
   syncEqUI();
+  syncPitchUI();
   drawEqCurve();
 }
 
@@ -9976,6 +10096,14 @@ function initEqModal() {
     applyEqToGraph();
     drawEqCurve();
     saveEq();
+  });
+  // 升降调：变调不变速（SoundTouchWSOLA），右键单击回原调
+  $('pitch-slider').addEventListener('input', () => {
+    setPitchSemitones(parseFloat($('pitch-slider').value) || 0);
+  });
+  $('pitch-slider').addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    setPitchSemitones(0);
   });
   $('btn-eq').addEventListener('click', openEqModal);
   // 全屏专辑页的均衡器入口
@@ -11946,6 +12074,7 @@ applyVolume();
     restoreAudioDevice();
     // 恢复均衡器设置（上次开着就先把滤波链搭好）
     initEqFromSettings();
+    initPitchFromSettings();
     
     // 优化启动速度：将耗时操作延迟到UI渲染完成后执行
     setTimeout(async () => {
