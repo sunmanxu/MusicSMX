@@ -10677,10 +10677,8 @@ document.querySelectorAll('.batch-item').forEach(item => {
     const action = item.dataset.action;
     $('batch-menu').hidden = true;
     hideMenuOverlay();
-    if (action === 'auto-fix') {
-      autoFixAll();
-    } else if (action === 'batch-download') {
-      startBatchDownload();
+    if (action === 'one-click-tidy') {
+      openTidyModal();
     } else if (action === 'batch-mp3') {
       showModal('convert-modal');
     } else if (action === 'export-missing') {
@@ -11202,6 +11200,184 @@ async function autoFixAll() {
   }, 5000);
   autoFixing = false;
 }
+
+// ---------- 一键整理：修复歌曲信息 + 存封面歌词（2026-11-25 合并原两个入口） ----------
+// 原「自动修复」只写 ID3 标签，原「批量下载」只存封面歌词；用户反馈两个入口重复，
+// 合并成一个向导：勾选后对每首歌按「修标签 → 按新信息存封面歌词」顺序跑一遍。
+// 注意：autofix-bar / batchdl-bar 还被别的流程复用，这里用独立的 tidy-bar，绝不改那两条。
+let tidyRunning = false;
+let tidyCancel = false;
+
+function openTidyModal() {
+  if (tidyRunning) { toast('已有整理任务在进行'); return; }
+  updateTidySummary();
+  showModal('tidy-modal');
+}
+
+function updateTidySummary() {
+  const el = $('tidy-summary');
+  if (!el) return;
+  const fix = !!($('tidy-fix') && $('tidy-fix').checked);
+  const media = !!($('tidy-media') && $('tidy-media').checked);
+  if (!fix && !media) { el.textContent = '请至少选择一项操作。'; return; }
+  const skipExisting = !!($('tidy-skip') && $('tidy-skip').checked);
+  const locked = S.settings.lockedTracks || {};
+  const fixed = S.settings.fixedTracks || {};
+  let n = 0;
+  for (const t of S.tracks) {
+    if (!t || !t.path || t.isPlaceholder) continue;
+    const needFix = fix && !locked[t.path] && !fixed[t.path];
+    const needMedia = media && !(skipExisting && trackHasSavedCoverAndLyrics(t));
+    if (needFix || needMedia) n++;
+  }
+  el.textContent = `本次将处理 ${n} 首（占位/缺失歌曲不参与；已锁定的不会被修复）。`;
+}
+
+function updateTidyBar(current, total, fixed, cover, lyrics, skip, fail) {
+  const p = $('tidy-bar-progress');
+  if (p) p.style.width = (total > 0 ? (current / total * 100) : 0) + '%';
+  $('tb-fixed').textContent = fixed;
+  $('tb-cover').textContent = cover;
+  $('tb-lyrics').textContent = lyrics;
+  $('tb-skip').textContent = skip;
+  $('tb-fail').textContent = fail;
+  $('tb-count').textContent = `${current}/${total}`;
+}
+
+// 显式整理时强制存缓存，不看 autoCover/autoLyrics 开关（那是播放时的被动行为）
+async function tidySaveCover(track) {
+  const key = mediaCacheKey(track.artist, track.title);
+  if (S.coverCache.has(track.path) || S.localCoverFiles.has(key)) return false; // 已有，没写入
+  const res = await mb.fetchCover(track.artist, track.title);
+  if (!res || !res.ok || !res.dataUrl) throw new Error(res?.error || '未找到封面');
+  S.coverCache.set(track.path, res.dataUrl);
+  applyCover(track, res.dataUrl);   // 列表缩略图/当前曲海报同步，不改当前曲守卫
+  const saved = await mb.saveCover(res.dataUrl, S.settings.cachePath || '', track.artist, track.title);
+  if (saved && saved.ok && saved.path) S.localCoverFiles.set(key, saved.path);
+  return true;
+}
+
+async function tidySaveLyrics(track) {
+  const key = mediaCacheKey(track.artist, track.title);
+  if (S.lyricsCache.has(track.path) || S.localLyricsFiles.has(key)) return false;
+  const res = await mb.fetchLyrics(track.artist, track.title, trackDurationSec(track));
+  if (!res || !res.ok || !res.lrc) throw new Error(res?.error || '未找到歌词');
+  const data = {
+    lrc: res.lrc,
+    tlyric: res.tlyric || '',
+    rlyric: res.rlyric || '',
+    yrc: res.yrc || '',
+    source: res.info?.source || ''
+  };
+  S.lyricsCache.set(track.path, data);
+  const saved = await mb.saveLyrics(data, S.settings.cachePath || '', track.artist, track.title,
+    { songName: res.info?.songName || track.title, artist: res.info?.artist || track.artist });
+  if (saved && saved.ok && saved.path) S.localLyricsFiles.set(key, saved.path);
+  if (isCurrentTrack(track)) {
+    renderLyrics(data);
+    applyLyricSourceFromData(data);
+    updateLyricsModeButtons();
+  }
+  return true;
+}
+
+async function startOneClickTidy(opts) {
+  if (tidyRunning) { toast('已有整理任务在进行'); return; }
+  if (!opts.fix && !opts.media) { toast('请至少选择一项操作'); return; }
+  const locked = S.settings.lockedTracks || {};
+  const fixed = S.settings.fixedTracks || {};
+  // 每首歌只跑一次；是否需要修标签、是否需要存媒体，在循环里按最新信息再判一次
+  const targets = S.tracks
+    .map((track, idx) => ({ track, idx }))
+    .filter(({ track }) => {
+      if (!track || !track.path || track.isPlaceholder) return false;
+      const needFix = opts.fix && !locked[track.path] && !fixed[track.path];
+      const needMedia = opts.media && !(opts.skip && trackHasSavedCoverAndLyrics(track));
+      return needFix || needMedia;
+    });
+  if (!targets.length) { toast('没有需要整理的歌曲'); return; }
+
+  tidyRunning = true;
+  tidyCancel = false;
+  let fixedCount = 0, coverCount = 0, lyricsCount = 0, skipCount = 0, failCount = 0, renameCount = 0;
+  const total = targets.length;
+  $('tidy-bar').style.display = 'flex';
+  updateTidyBar(0, total, 0, 0, 0, 0, 0);
+  toast(`已开始一键整理，共 ${total} 首，进度在顶栏下方显示`);
+
+  for (let i = 0; i < total; i++) {
+    if (tidyCancel) break;
+    const { track, idx } = targets[i];
+    let didSomething = false;
+
+    // 1) 修标签：写 ID3 + 按「歌手 - 标题 - 专辑」重命名
+    if (opts.fix && !locked[track.path] && !fixed[track.path]) {
+      try {
+        const result = await mb.autoFixTrack(track.artist, track.title, track.album || '', track.duration || 0);
+        if (result && result.needFix) {
+          if (result.fixed.title) track.title = result.fixed.title;
+          if (result.fixed.artist && !/^(未知歌手|未知艺术家|未知|未知艺人)$/.test(result.fixed.artist)) track.artist = result.fixed.artist;
+          if (result.fixed.album && !/^未知专辑$/.test(result.fixed.album)) track.album = result.fixed.album;
+          fixedCount++; didSomething = true;
+          const writeRes = await mb.writeMusicMetadata(track.path, track.title, track.artist, track.album);
+          if (writeRes && writeRes.ok) {
+            try { if (await renameTrackFile(idx, true)) renameCount++; } catch (e) { /* 改名失败不影响标签 */ }
+            S.settings.fixedTracks[track.path] = Date.now();
+          } else {
+            failCount++;
+            console.error('写入标签失败:', track.path, writeRes?.error);
+          }
+        } else {
+          skipCount++;
+        }
+      } catch (e) { failCount++; }
+    }
+
+    // 2) 存封面/歌词：用修复后的歌名歌手当 key，避免封面串到旧名字上
+    if (opts.media && !(opts.skip && trackHasSavedCoverAndLyrics(track))) {
+      try {
+        if (await tidySaveCover(track)) { coverCount++; didSomething = true; } else skipCount++;
+      } catch (e) { failCount++; }
+      try {
+        if (await tidySaveLyrics(track)) { lyricsCount++; didSomething = true; } else skipCount++;
+      } catch (e) { failCount++; }
+    }
+
+    if ((i + 1) % 10 === 0 || i === total - 1) renderList();
+    updateTidyBar(i + 1, total, fixedCount, coverCount, lyricsCount, skipCount, failCount);
+    await new Promise(r => setTimeout(r, 200));
+  }
+
+  renderList();
+  if (S.current >= 0) updateNowPlaying();
+  saveConfig();
+  const done = tidyCancel ? '已取消' : '整理完成';
+  let summary = `${done}！修复${fixedCount}首，封面${coverCount}首，歌词${lyricsCount}首，跳过${skipCount}首，失败${failCount}首`;
+  if (renameCount > 0) summary += `，文件名已更新${renameCount}首`;
+  toast(summary, failCount > 0 ? 8000 : 5000);
+  setTimeout(() => { if (!tidyRunning) $('tidy-bar').style.display = 'none'; }, 5000);
+  tidyRunning = false;
+}
+
+['tidy-fix', 'tidy-media', 'tidy-skip'].forEach(id => {
+  const el = $(id);
+  if (el) el.addEventListener('change', updateTidySummary);
+});
+document.querySelectorAll('[data-close="tidy"]').forEach(el => {
+  el.addEventListener('click', () => { $('tidy-modal').hidden = true; });
+});
+$('btn-tidy-start').addEventListener('click', () => {
+  $('tidy-modal').hidden = true;
+  startOneClickTidy({
+    fix: !!($('tidy-fix') && $('tidy-fix').checked),
+    media: !!($('tidy-media') && $('tidy-media').checked),
+    skip: !!($('tidy-skip') && $('tidy-skip').checked)
+  });
+});
+$('tb-cancel').addEventListener('click', () => {
+  tidyCancel = true;
+  toast('正在取消整理...');
+});
 
 // ---------- 写入文件标签（歌名 / 歌手 / 专辑） ----------
 // 资源管理器「标题 / 参与创作的艺术家 / 专辑」三列读的就是音频文件本身的标签。

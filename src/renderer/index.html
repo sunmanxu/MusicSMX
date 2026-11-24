@@ -59,18 +59,11 @@
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 8V6a3 3 0 0 1 6 0v2"/><rect x="2" y="8" width="20" height="13" rx="2"/><path d="M2 12.5h20"/><rect x="9.5" y="10.5" width="5" height="4" rx="0.8"/></svg>
         </button>
         <div id="batch-menu" class="batch-menu" hidden>
-          <div class="batch-item" data-action="auto-fix">
+          <div class="batch-item" data-action="one-click-tidy">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M9 12l2 2 4-4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
             <div>
-              <div class="batch-title">自动修复</div>
-              <div class="batch-desc">联网校验并修复所有歌曲的标题、歌手、专辑</div>
-            </div>
-          </div>
-          <div class="batch-item" data-action="batch-download">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><polyline points="7 10 12 15 17 10" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><line x1="12" y1="15" x2="12" y2="3" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-            <div>
-              <div class="batch-title">批量下载</div>
-              <div class="batch-desc">一键下载所有歌曲的专辑封面和歌词（已下载自动跳过）</div>
+              <div class="batch-title">一键整理</div>
+              <div class="batch-desc">修复歌曲信息 + 下载专辑封面和歌词，一次完成</div>
             </div>
           </div>
           <div class="batch-item" data-action="batch-mp3">
@@ -239,6 +232,23 @@
           <span class="af-stat af-count" id="bd-bar-count">0/0</span>
         </div>
         <button class="af-cancel-btn" id="bd-bar-cancel" title="取消下载">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none"><path d="M18 6L6 18M6 6l12 12" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/></svg>
+        </button>
+      </div>
+      <!-- 一键整理进度条（修标签 + 封面歌词共用一条） -->
+      <div id="tidy-bar" class="autofix-bar" style="display: none;">
+        <div class="autofix-bar-progress-wrap">
+          <div class="autofix-bar-progress" id="tidy-bar-progress"></div>
+        </div>
+        <div class="autofix-bar-stats">
+          <span class="af-stat af-fixed">修复 <b id="tb-fixed">0</b></span>
+          <span class="af-stat af-fixed">封面 <b id="tb-cover">0</b></span>
+          <span class="af-stat af-fixed">歌词 <b id="tb-lyrics">0</b></span>
+          <span class="af-stat af-skip">跳过 <b id="tb-skip">0</b></span>
+          <span class="af-stat af-fail">失败 <b id="tb-fail">0</b></span>
+          <span class="af-stat af-count" id="tb-count">0/0</span>
+        </div>
+        <button class="af-cancel-btn" id="tb-cancel" title="取消整理">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none"><path d="M18 6L6 18M6 6l12 12" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/></svg>
         </button>
       </div>
@@ -983,6 +993,45 @@
     <div class="modal-foot">
       <button class="btn ghost" data-close="edit">取消</button>
       <button class="btn primary" id="btn-save-edit">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- 一键整理向导（合并原「自动修复」+「批量下载」，2026-11-25） -->
+<div id="tidy-modal" class="modal" hidden>
+  <div class="modal-mask" data-close="tidy"></div>
+  <div class="modal-box" style="width: 460px;">
+    <div class="modal-head">
+      <span>一键整理音乐库</span>
+      <button class="modal-close" data-close="tidy">×</button>
+    </div>
+    <div class="modal-body">
+      <div style="font-size:13px;color:var(--text-dim);line-height:1.6;margin-bottom:14px;">
+        选好本次要做的事，会按顺序处理曲库里的每首歌。修复信息会写进音乐文件本身，建议先备份。
+      </div>
+      <label style="display:flex;align-items:flex-start;gap:10px;padding:10px 0;cursor:pointer;border-bottom:1px solid var(--border);">
+        <input type="checkbox" id="tidy-fix" checked style="width:16px;height:16px;cursor:pointer;margin-top:2px;">
+        <span style="font-size:13px;line-height:1.5;">
+          <b>修复歌曲信息</b>（标题 / 歌手 / 专辑）<br>
+          <span style="color:var(--text-faint);font-size:12px;">联网校验后写入文件 ID3 标签，并重命名文件。已修复过的会跳过。</span>
+        </span>
+      </label>
+      <label style="display:flex;align-items:flex-start;gap:10px;padding:10px 0;cursor:pointer;border-bottom:1px solid var(--border);">
+        <input type="checkbox" id="tidy-media" checked style="width:16px;height:16px;cursor:pointer;margin-top:2px;">
+        <span style="font-size:13px;line-height:1.5;">
+          <b>下载专辑封面和歌词</b><br>
+          <span style="color:var(--text-faint);font-size:12px;">存到缓存路径，不改动音乐文件。修复信息后按新歌名/歌手保存。</span>
+        </span>
+      </label>
+      <label style="display:flex;align-items:center;gap:10px;padding:10px 0;cursor:pointer;">
+        <input type="checkbox" id="tidy-skip" checked style="width:16px;height:16px;cursor:pointer;">
+        <span style="font-size:13px;">封面和歌词都已存在的歌曲跳过（更快）</span>
+      </label>
+      <div id="tidy-summary" style="font-size:12px;color:var(--text-faint);line-height:1.6;margin-top:6px;"></div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn ghost" data-close="tidy">取消</button>
+      <button class="btn primary" id="btn-tidy-start">开始整理</button>
     </div>
   </div>
 </div>
