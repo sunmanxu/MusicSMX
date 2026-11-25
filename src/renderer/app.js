@@ -339,8 +339,7 @@ const S = {
     lyricOpacities: { desktop: 0.5, taskbar: 0.5 },  // 0.1 ~ 1
     fixedTracks: {},  // 已自动修复的歌曲路径 -> 修复时间戳
     lockedTracks: {},  // 已锁定的歌曲路径 -> 锁定时间戳（自动修复时跳过）
-    renameOnEdit: true,  // 修改歌曲信息时同时把文件名改为所选格式（勾选框默认态，记住用户选择）
-    renameFormat: 'artist-title-album', // 重命名文件名格式：artist-title-album | title-artist-album | artist-album-title（记住用户选择）
+    renameFormat: 'artist-title-album', // 三合一同步里重命名文件名的格式：artist-title-album | title-artist-album | artist-album-title（记住用户选择）
     syncFillAlbum: true,   // 三合一同步窗口：补全缺失专辑 勾选默认态（记住用户选择）
     syncRename: true,      // 三合一同步窗口：同步至源文件名 勾选默认态
     syncWriteTags: true,   // 三合一同步窗口：写入文件标签 勾选默认态
@@ -10263,9 +10262,6 @@ function openEditModal(track, focusField) {
   $('edit-title-input').value = track.title || '';
   $('edit-artist-input').value = track.artist || '';
   $('edit-album-input').value = track.album || '';
-  const renameEl = $('edit-rename-file');
-  // 默认勾选「同时改文件名」，并记住用户上次的选择
-  if (renameEl) renameEl.checked = S.settings.renameOnEdit !== false;
   showModal('edit-modal');
   // 聚焦到对应字段
   setTimeout(() => {
@@ -10291,10 +10287,6 @@ $('btn-save-edit').addEventListener('click', async () => {
   const newTitle = $('edit-title-input').value.trim();
   const newArtist = $('edit-artist-input').value.trim();
   const newAlbum = $('edit-album-input').value.trim();
-  const renameEl = $('edit-rename-file');
-  const doRename = !!(renameEl && renameEl.checked) && !track.isPlaceholder;
-  // 记住勾选偏好，下次打开弹窗沿用
-  if (renameEl) S.settings.renameOnEdit = renameEl.checked;
   if (newTitle) track.title = newTitle;
   if (newArtist) track.artist = newArtist;
   track.album = newAlbum;
@@ -10328,10 +10320,8 @@ $('btn-save-edit').addEventListener('click', async () => {
   try {
     const writeRes = await mb.writeMusicMetadata(track.path, track.title, track.artist, track.album);
     if (writeRes && writeRes.ok) {
-      let renamed = false;
-      if (doRename) renamed = !!(await renameTrackFile(idx, true));
       saveConfig();
-      toast('歌曲信息已写入源文件' + (doRename ? (renamed ? '，文件名已同步更新' : '，但文件名未更改（可能被占用或已存在同名文件）') : ''));
+      toast('歌曲信息已写入源文件');
     } else {
       saveConfig();
       toast('写入源文件失败：' + (writeRes?.error || '未知错误') + '（仅列表显示已更新）');
