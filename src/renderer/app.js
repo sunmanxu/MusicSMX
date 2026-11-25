@@ -483,7 +483,7 @@ const MODE_ICONS = {
       + '</svg>'
   }
 };
-const MODE_ORDER = ['list', 'one', 'shuffle'];
+const MODE_ORDER = ['list', 'shuffle', 'one'];
 const MODE_NAME = { list: '列表循环', one: '单曲循环', shuffle: '随机播放' };
 
 // ---- 工具 ----
