@@ -669,7 +669,10 @@ body.popover-open #topbar { -webkit-app-region: no-drag; }
 #track-head span { cursor: pointer; user-select: none; }
 #track-head span:hover { color: var(--text-dim); }
 #track-head span.sorted { color: var(--accent); }
-.col-index { text-align: center; }
+/* 排序切换按钮（列表表头最左的音符）：不要沿用表头最淡的 --text-faint，
+   14px 细线条图标在深色底上会淡到看不见（2026-11-25 用户反馈「透明了」） */
+#track-head .col-index { text-align: center; color: var(--text-dim); }
+#track-head .col-index:hover { color: var(--accent); }
 
 #track-list {
   flex: 1;
@@ -781,7 +784,6 @@ body.popover-open #topbar { -webkit-app-region: no-drag; }
 }
 .track-row.placeholder .t-title .txt {
   color: var(--text-faint);
-  text-decoration: line-through;
 }
 .track-row.placeholder .t-artist,
 .track-row.placeholder .t-album {

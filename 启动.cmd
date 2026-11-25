@@ -12,7 +12,7 @@ cd /d "%~dp0"
 set "ELECTRON_RUN_AS_NODE="
 
 rem Keep in sync with build.directories.output in package.json
-set "EXE=release-v32\win-unpacked\MusicSMX.exe"
+set "EXE=release-v44\win-unpacked\MusicSMX.exe"
 if not exist "%EXE%" (
   echo.
   echo   Build not found: %EXE%

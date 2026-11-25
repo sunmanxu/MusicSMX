@@ -832,11 +832,6 @@ $('queue-list').addEventListener('click', (e) => {
   renderQueuePanel();
 });
 
-// 桃心 SVG 图标
-const HEART_SVG = '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>';
-const HEART_OUTLINE_SVG = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>';
-const PLAYLIST_SVG = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg>';
-
 // 显示歌单选择菜单（trackPath 可以是单个路径或路径数组，多选批量加歌单共用）
 let playlistMenuEl = null;
 function showPlaylistMenu(e, trackPath) {
@@ -1971,11 +1966,13 @@ function createTrackRow(t, i, cur) {
     toggleTrackFilter('album', t.album);
   });
 
-  const actions = document.createElement('div');
-  actions.className = 'row-actions';
-  
+  // 行尾 hover 操作按钮组（收藏 / 歌单 / 播放 / 下一首）已按用户要求下线（2026-11-25）：
+  // 正常曲目不再弹这个浮窗；占位 / 缺失条目仍保留单个「缺失」状态提示按钮。
+  let actions = null;
   if (isPlaceholder) {
     // 占位/缺失歌曲：只显示一个"缺失"提示按钮，禁用所有操作
+    actions = document.createElement('div');
+    actions.className = 'row-actions';
     const btnMissing = document.createElement('button');
     btnMissing.className = 'row-missing-btn';
     btnMissing.title = t.isMissing ? '文件缺失，无法播放（条目保留供对照找回）' : '本地无此歌曲，无法播放';
@@ -1985,47 +1982,10 @@ function createTrackRow(t, i, cur) {
       toast(t.isMissing ? '文件缺失，无法播放（可导出缺失名单对照找回）' : '本地无此歌曲，无法播放');
     });
     actions.append(btnMissing);
-  } else {
-    // 正常歌曲：显示收藏、歌单、播放、下一首按钮
-    // 收藏按钮
-    const btnFav = document.createElement('button');
-    btnFav.className = 'row-fav-btn' + (isFavorite(t.path) ? ' faved' : '');
-    btnFav.title = isFavorite(t.path) ? '取消收藏' : '收藏';
-    btnFav.innerHTML = isFavorite(t.path) ? HEART_SVG : HEART_OUTLINE_SVG;
-    btnFav.addEventListener('click', (e) => {
-      e.stopPropagation();
-      toggleFavorite(t.path);
-    });
-    // 歌单按钮
-    const btnPlaylist = document.createElement('button');
-    btnPlaylist.className = 'row-playlist-btn';
-    btnPlaylist.title = '添加到歌单';
-    btnPlaylist.innerHTML = PLAYLIST_SVG;
-    btnPlaylist.addEventListener('click', (e) => {
-      e.stopPropagation();
-      showPlaylistMenu(e, t.path);
-    });
-    const btnPlay = document.createElement('button');
-    btnPlay.title = '播放';
-    btnPlay.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M7 4.5v15l13-7.5z"/></svg>';
-    btnPlay.addEventListener('click', (e) => { e.stopPropagation(); playAt(S.tracks.indexOf(t)); });
-    const btnNext = document.createElement('button');
-    btnNext.title = '下一首播放';
-    btnNext.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M4 5v14l9-7zM16 5h2v14h-2zM13 9l3 3-3 3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>';
-    btnNext.addEventListener('click', (e) => {
-      e.stopPropagation();
-      const idx = S.tracks.indexOf(t);
-      if (S.current >= 0 && idx !== S.current + 1) {
-        S.tracks.splice(idx, 1);
-        S.tracks.splice(S.current + 1, 0, t);
-        renderList();
-        toast('已添加到下一首播放');
-      }
-    });
-    actions.append(btnFav, btnPlaylist, btnPlay, btnNext);
   }
 
-  row.append(cIndex, cTitle, cArtist, cAlbum, actions);
+  row.append(cIndex, cTitle, cArtist, cAlbum);
+  if (actions) row.append(actions);
   const rowIdx = S.tracks.indexOf(t);
   if (S.multiSel.has(t) || S.selectedIdx === rowIdx) row.classList.add('selected');
   // 单击只选中，不播放：避免翻列表时误点打断正在听的歌（双击才播）
@@ -9711,22 +9671,14 @@ document.querySelectorAll('[data-close="merge"]').forEach(el => {
 const EQ_BANDS = [31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000];
 const EQ_PRESETS = {
   flat:       [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-  pop:        [-1, 0, 2, 4, 4, 2, 0, -1, -2, -2],
   rock:       [4, 3, 2, 0, -2, -1, 1, 3, 4, 4],
+  pop:        [-1, 0, 2, 4, 4, 2, 0, -1, -2, -2],
   classical:  [3, 2, 1, 0, -1, -1, 0, 2, 3, 4],
   jazz:       [2, 1, 0, 1, 2, -1, 0, 1, 2, 3],
   vocal:      [-2, -2, -1, 2, 4, 4, 3, 1, 0, -1],
   bass:       [6, 5, 4, 2, 0, 0, 0, 0, 0, 0],
   treble:     [0, 0, 0, 0, 0, 1, 2, 4, 5, 6],
-  electronic: [4, 3, 0, -2, 2, 1, 0, 2, 4, 5],
-  // —— 品牌音效风格（参考各厂声音签名的通行调音取向，非官方数据）——
-  harman:     [3, 2, 1, 0, -1, 0, 1, 1, 2, 2],   // 哈曼卡顿：温润均衡，低音/高音轻微提升、中频顺滑
-  beats:      [7, 6, 3, 1, -1, -1, 0, 1, 3, 3],  // Beats：重低音轰炸，中频略凹
-  bose:       [5, 4, 2, 0, -1, -1, 0, 2, 3, 2],  // Bose：深沉温暖的低频
-  bo:         [2, 1, 0, -1, 0, 1, 2, 3, 3, 2],   // B&O：通透干净，空气感
-  sennheiser: [1, 1, 0, 1, 2, 2, 1, 0, 1, 1],    // 森海塞尔：自然均衡，中频略前
-  sony:       [4, 3, 1, 0, -1, -1, 1, 3, 4, 4],  // 索尼：动感 V 形
-  apple:      [1, 0, 0, 1, 1, 0, 0, 1, 2, 2]     // 苹果：干净中性，高音稍亮
+  electronic: [4, 3, 0, -2, 2, 1, 0, 2, 4, 5]
 };
 const eq = {
   ctx: null, src: null, preamp: null, filters: [], chainOn: false, chainWired: false,
@@ -9757,7 +9709,11 @@ function initEqFromSettings() {
     if (Array.isArray(st.gains) && st.gains.length === EQ_BANDS.length) {
       eq.gains = st.gains.map(v => Number(v) || 0);
     }
-    eq.preset = st.preset || 'custom';
+    // 旧配置里可能存着已下线的预设键（如品牌音效 beats/sony），
+    // 下拉里已没有对应 option，直接回填会让预设框显示空白 —— 统一回退成「自定义」，
+    // 原有的增益数值仍保留，听感不变。
+    const savedPreset = st.preset || 'custom';
+    eq.preset = (savedPreset === 'custom' || EQ_PRESETS[savedPreset]) ? savedPreset : 'custom';
   }
   if (eq.on) {
     // 上次开着：把链搭好（AudioContext 可能 suspended，首次播放时 resume）
